@@ -1,5 +1,7 @@
 import os
+import time
 from functools import lru_cache
+from urllib.parse import urljoin
 
 import pandas as pd
 import requests
@@ -20,18 +22,103 @@ def _check_credentials():
         )
 
 
-def _get(endpoint):
+def _request_url(url, params=None):
     _check_credentials()
 
     response = requests.get(
-        f"{BASE_URL}{endpoint}",
+        url,
         auth=(API_KEY, API_SECRET),
-        timeout=20,
+        params=params,
+        timeout=30,
     )
+
+    if response.status_code == 429:
+        print("Trading 212 rate limit reached. Waiting 12 seconds...")
+        time.sleep(12)
+
+        response = requests.get(
+            url,
+            auth=(API_KEY, API_SECRET),
+            params=params,
+            timeout=30,
+        )
 
     response.raise_for_status()
 
     return response.json()
+
+
+def _get(endpoint, params=None):
+    return _request_url(
+        f"{BASE_URL}{endpoint}",
+        params=params,
+    )
+
+
+def _get_all_pages(endpoint):
+    data = _get(
+        endpoint,
+        params={"limit": 50},
+    )
+
+    all_items = data.get("items", [])
+    next_page = data.get("nextPagePath")
+
+    while next_page:
+        next_url = urljoin(
+            BASE_URL + "/",
+            next_page,
+        )
+
+        data = _request_url(next_url)
+
+        all_items.extend(
+            data.get("items", [])
+        )
+
+        next_page = data.get("nextPagePath")
+
+    return all_items
+
+
+def _normalise_taxes(taxes, wallet_currency):
+    if taxes is None:
+        return 0.0, 0
+
+    if isinstance(taxes, (int, float)):
+        return float(taxes), 0
+
+    if not isinstance(taxes, list):
+        return 0.0, 0
+
+    total = 0.0
+    unconverted_count = 0
+
+    for tax in taxes:
+        if not isinstance(tax, dict):
+            continue
+
+        quantity = tax.get("quantity")
+        tax_currency = tax.get("currency")
+
+        if quantity is None:
+            continue
+
+        try:
+            quantity = float(quantity)
+        except (TypeError, ValueError):
+            continue
+
+        if (
+            not tax_currency
+            or not wallet_currency
+            or tax_currency == wallet_currency
+        ):
+            total += quantity
+        else:
+            unconverted_count += 1
+
+    return total, unconverted_count
 
 
 def get_account_summary():
@@ -40,7 +127,9 @@ def get_account_summary():
 
 @lru_cache(maxsize=1)
 def get_instrument_metadata():
-    instruments = _get("/equity/metadata/instruments")
+    instruments = _get(
+        "/equity/metadata/instruments"
+    )
 
     return {
         instrument["ticker"]: instrument
@@ -116,3 +205,70 @@ def get_positions():
         )
 
     return pd.DataFrame(cleaned_positions)
+
+
+def get_all_transactions():
+    transactions = _get_all_pages(
+        "/equity/history/transactions"
+    )
+
+    return pd.DataFrame(transactions)
+
+
+def get_all_dividends():
+    dividends = _get_all_pages(
+        "/equity/history/dividends"
+    )
+
+    return pd.DataFrame(dividends)
+
+
+def get_all_orders():
+    items = _get_all_pages(
+        "/equity/history/orders"
+    )
+
+    cleaned_orders = []
+
+    for item in items:
+        order = item.get("order") or {}
+        fill = item.get("fill") or {}
+
+        instrument = order.get("instrument") or {}
+        wallet = fill.get("walletImpact") or {}
+
+        wallet_currency = wallet.get("currency")
+
+        tax_total, unconverted_tax_count = _normalise_taxes(
+            wallet.get("taxes"),
+            wallet_currency,
+        )
+
+        cleaned_orders.append(
+            {
+                "order_id": order.get("id"),
+                "ticker": order.get("ticker"),
+                "side": order.get("side"),
+                "order_type": order.get("type"),
+                "status": order.get("status"),
+                "created_at": order.get("createdAt"),
+                "filled_at": fill.get("filledAt"),
+                "quantity": fill.get("quantity"),
+                "price": fill.get("price"),
+                "currency": order.get("currency"),
+                "order_value": order.get("value"),
+                "filled_value": order.get("filledValue"),
+                "instrument_name": instrument.get("name"),
+                "net_value": wallet.get("netValue", 0),
+                "realised_pnl": wallet.get(
+                    "realisedProfitLoss",
+                    0,
+                ),
+                "taxes": tax_total,
+                "unconverted_tax_count": unconverted_tax_count,
+                "fx_rate": wallet.get("fxRate"),
+                "wallet_currency": wallet_currency,
+            }
+        )
+
+    return pd.DataFrame(cleaned_orders)
