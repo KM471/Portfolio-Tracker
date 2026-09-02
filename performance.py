@@ -2,12 +2,8 @@ import math
 
 import pandas as pd
 
-from trading212 import (
-    get_account_summary,
-    get_all_dividends,
-    get_all_orders,
-    get_all_transactions,
-)
+from trading212 import get_account_summary
+from history_cache import get_cached_history
 
 
 def _numeric_total(series):
@@ -57,16 +53,10 @@ def _xirr(cash_flows):
         for _, amount in cash_flows
     ]
 
-    if not any(
-        amount < 0
-        for amount in amounts
-    ):
+    if not any(amount < 0 for amount in amounts):
         return None
 
-    if not any(
-        amount > 0
-        for amount in amounts
-    ):
+    if not any(amount > 0 for amount in amounts):
         return None
 
     candidate_rates = [
@@ -116,17 +106,12 @@ def _xirr(cash_flows):
         if current_value == 0:
             return current_rate
 
-        if (
-            previous_value * current_value
-            < 0
-        ):
+        if previous_value * current_value < 0:
             low = previous_rate
             high = current_rate
 
             for _ in range(200):
-                middle = (
-                    low + high
-                ) / 2
+                middle = (low + high) / 2
 
                 middle_value = _xnpv(
                     middle,
@@ -141,18 +126,12 @@ def _xirr(cash_flows):
                     cash_flows,
                 )
 
-                if (
-                    low_value
-                    * middle_value
-                    <= 0
-                ):
+                if low_value * middle_value <= 0:
                     high = middle
                 else:
                     low = middle
 
-            return (
-                low + high
-            ) / 2
+            return (low + high) / 2
 
         previous_rate = current_rate
         previous_value = current_value
@@ -192,9 +171,7 @@ def _calculate_mwr(
         return None
 
     currencies = set(
-        cash_flows[
-            "currency"
-        ].dropna()
+        cash_flows["currency"].dropna()
     )
 
     if currencies and currencies != {
@@ -205,9 +182,6 @@ def _calculate_mwr(
     dated_flows = []
 
     for row in cash_flows.itertuples():
-        # Investor perspective:
-        # deposit into Trading 212 = money leaving us
-        # withdrawal = money returning to us
         investor_cash_flow = (
             -float(row.amount)
         )
@@ -234,24 +208,24 @@ def _calculate_mwr(
 
 
 def get_performance_summary():
+    # Current account value remains live.
     account = get_account_summary()
 
-    transactions = get_all_transactions()
-    orders = get_all_orders()
-    dividends = get_all_dividends()
+    # Historical data comes from the cache.
+    transactions, orders, dividends = (
+        get_cached_history()
+    )
 
     deposits = _numeric_total(
         transactions.loc[
-            transactions["type"]
-            == "DEPOSIT",
+            transactions["type"] == "DEPOSIT",
             "amount",
         ]
     )
 
     withdrawals = _numeric_total(
         transactions.loc[
-            transactions["type"]
-            == "WITHDRAW",
+            transactions["type"] == "WITHDRAW",
             "amount",
         ]
     )
@@ -270,9 +244,7 @@ def get_performance_summary():
 
     unconverted_tax_items = int(
         _numeric_total(
-            orders[
-                "unconverted_tax_count"
-            ]
+            orders["unconverted_tax_count"]
         )
     )
 
