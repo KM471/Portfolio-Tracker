@@ -1,370 +1,389 @@
-import altair as alt
 import streamlit as st
 
-from trading212 import get_account_summary, get_positions
+from trading212 import get_account_summary
+from performance_metrics import get_performance_metrics
+from return_metrics import get_return_metrics
+from risk_metrics import get_risk_metrics
 
 
 st.set_page_config(
     page_title="Portfolio Intelligence",
-    page_icon="📊",
+    page_icon="📈",
     layout="wide",
 )
 
 
-@st.cache_data(ttl=30, show_spinner=False)
-def load_portfolio_data():
-    account = get_account_summary()
-    positions = get_positions()
+@st.cache_data(
+    ttl=60,
+    show_spinner=False,
+)
+def load_dashboard_data():
 
-    return account, positions
+    performance_history, performance = (
+        get_performance_metrics()
+    )
+
+    returns = get_return_metrics()
+
+    risk = get_risk_metrics()
+
+    live_account = get_account_summary()
+
+    return (
+        performance_history,
+        performance,
+        returns,
+        risk,
+        live_account,
+    )
 
 
-title_col, refresh_col = st.columns([6, 1])
+st.title("Portfolio Intelligence")
 
-with title_col:
-    st.title("Portfolio Intelligence")
-    st.caption("Live portfolio data from Trading 212")
-
-with refresh_col:
-    if st.button("Refresh"):
-        st.cache_data.clear()
-        st.rerun()
+st.caption(
+    "Trading 212 portfolio performance, "
+    "benchmarking and risk analytics."
+)
 
 
 try:
-    with st.spinner("Loading portfolio..."):
-        account, portfolio = load_portfolio_data()
+
+    with st.spinner(
+        "Loading portfolio data..."
+    ):
+
+        (
+            history,
+            performance,
+            returns,
+            risk,
+            live,
+        ) = load_dashboard_data()
 
 except Exception as error:
-    st.error("Could not load Trading 212 data.")
-    st.exception(error)
+
+    st.error(
+        f"Unable to load portfolio data: {error}"
+    )
+
     st.stop()
 
 
-if portfolio.empty:
-    st.warning("No open positions were found.")
-    st.stop()
+# ------------------------------------------------------------
+# Live Trading 212 values
+# ------------------------------------------------------------
 
-
-currency = account["currency"]
-
-currency_symbols = {
-    "EUR": "€",
-    "USD": "$",
-    "GBP": "£",
-}
-
-currency_symbol = currency_symbols.get(
-    currency,
-    f"{currency} ",
-)
-
-
-total_value = account["totalValue"]
-
-cash_available = account["cash"]["availableToTrade"]
-
-investment_value = account["investments"]["currentValue"]
-
-investment_cost = account["investments"]["totalCost"]
-
-total_unrealised_pnl = account["investments"][
-    "unrealizedProfitLoss"
-]
-
-
-if investment_cost:
-    portfolio_return_pct = (
-        total_unrealised_pnl / investment_cost
+live_total = float(
+    live.get(
+        "totalValue",
+        performance[
+            "portfolio_value_eur"
+        ],
     )
-else:
-    portfolio_return_pct = 0
+)
 
-
-if investment_value:
-    portfolio["weight"] = (
-        portfolio["current_value"] / investment_value
+investments = float(
+    live.get(
+        "investments",
+        {},
+    ).get(
+        "currentValue",
+        0.0,
     )
-else:
-    portfolio["weight"] = 0
+)
 
+cash_data = live.get(
+    "cash",
+    {},
+)
 
-portfolio["return_pct"] = portfolio.apply(
-    lambda row: (
-        row["unrealised_pnl"] / row["total_cost"]
-        if row["total_cost"]
-        else 0
-    ),
-    axis=1,
+available_cash = float(
+    cash_data.get(
+        "availableToTrade",
+        0.0,
+    )
+)
+
+reserved_cash = float(
+    cash_data.get(
+        "reservedForOrders",
+        0.0,
+    )
+)
+
+pie_cash = float(
+    cash_data.get(
+        "inPies",
+        0.0,
+    )
+)
+
+visible_cash = (
+    available_cash
+    + reserved_cash
+    + pie_cash
+)
+
+other_balance = (
+    live_total
+    - investments
+    - visible_cash
 )
 
 
-largest_position = portfolio.loc[
-    portfolio["current_value"].idxmax()
-]
+# ------------------------------------------------------------
+# Overview
+# ------------------------------------------------------------
 
-top_three_weight = (
-    portfolio
-    .nlargest(3, "current_value")["weight"]
-    .sum()
-)
+st.subheader("Overview")
 
+col1, col2, col3, col4 = st.columns(4)
 
-metric1, metric2, metric3, metric4 = st.columns(4)
+with col1:
 
-metric1.metric(
-    label="Total Account Value",
-    value=f"{currency_symbol}{total_value:,.2f}",
-)
+    st.metric(
+        "Account value",
+        f"€{live_total:,.2f}",
+    )
 
-metric2.metric(
-    label="Investments",
-    value=f"{currency_symbol}{investment_value:,.2f}",
-)
+with col2:
 
-metric3.metric(
-    label="Unrealised P/L",
-    value=f"{currency_symbol}{total_unrealised_pnl:,.2f}",
-    delta=f"{portfolio_return_pct:.2%}",
-)
+    st.metric(
+        "Net capital invested",
+        (
+            f"€"
+            f"{performance['net_capital_invested_eur']:,.2f}"
+        ),
+    )
 
-metric4.metric(
-    label="Available Cash",
-    value=f"{currency_symbol}{cash_available:,.2f}",
-)
+with col3:
+
+    st.metric(
+        "Account gain",
+        (
+            f"€"
+            f"{performance['simple_gain_eur']:,.2f}"
+        ),
+        (
+            f"{performance['simple_return_pct']:.2f}%"
+        ),
+    )
+
+with col4:
+
+    st.metric(
+        "Peak capital invested",
+        (
+            f"€"
+            f"{performance['peak_net_capital_eur']:,.2f}"
+        ),
+    )
 
 
 st.divider()
 
 
-metric5, metric6, metric7 = st.columns(3)
+# ------------------------------------------------------------
+# Performance
+# ------------------------------------------------------------
 
-metric5.metric(
-    label="Open Positions",
-    value=len(portfolio),
-)
+st.subheader("Performance")
 
-metric6.metric(
-    label="Largest Position",
-    value=largest_position["display_ticker"],
-    delta=f"{largest_position['weight']:.1%} of portfolio",
-)
+col1, col2, col3, col4 = st.columns(4)
 
-metric7.metric(
-    label="Top 3 Concentration",
-    value=f"{top_three_weight:.1%}",
-)
+with col1:
 
-
-st.subheader("Portfolio Overview")
-
-
-chart1, chart2 = st.columns(2)
-
-
-with chart1:
-    st.markdown("#### Allocation")
-
-    allocation_chart = (
-        alt.Chart(portfolio)
-        .mark_arc(innerRadius=70)
-        .encode(
-            theta=alt.Theta(
-                "current_value:Q",
-                title="Current Value",
-            ),
-            color=alt.Color(
-                "display_ticker:N",
-                title="Holding",
-            ),
-            tooltip=[
-                alt.Tooltip(
-                    "display_ticker:N",
-                    title="Ticker",
-                ),
-                alt.Tooltip(
-                    "company:N",
-                    title="Company",
-                ),
-                alt.Tooltip(
-                    "current_value:Q",
-                    title="Value",
-                    format=",.2f",
-                ),
-                alt.Tooltip(
-                    "weight:Q",
-                    title="Weight",
-                    format=".1%",
-                ),
-            ],
-        )
-        .properties(
-            height=350,
-        )
+    st.metric(
+        "Portfolio TWR",
+        (
+            f"{performance['portfolio_twr_pct']:.2f}%"
+        ),
     )
 
-    st.altair_chart(
-        allocation_chart,
-        width="stretch",
+with col2:
+
+    st.metric(
+        "S&P 500 TWR",
+        (
+            f"{performance['benchmark_twr_pct']:.2f}%"
+        ),
+    )
+
+with col3:
+
+    st.metric(
+        "Outperformance",
+        (
+            f"{performance['relative_return_pp']:+.2f} pp"
+        ),
+    )
+
+with col4:
+
+    st.metric(
+        "Portfolio CAGR",
+        (
+            f"{returns['portfolio_cagr_pct']:.2f}%"
+        ),
     )
 
 
-with chart2:
-    st.markdown("#### Unrealised P/L by Holding")
+col1, col2, col3, col4 = st.columns(4)
 
-    pnl_chart = (
-        alt.Chart(portfolio)
-        .mark_bar()
-        .encode(
-            x=alt.X(
-                "unrealised_pnl:Q",
-                title=f"Unrealised P/L ({currency})",
-            ),
-            y=alt.Y(
-                "display_ticker:N",
-                title=None,
-                sort="-x",
-            ),
-            color=alt.Color(
-                "unrealised_pnl:Q",
-                title="P/L",
-                scale=alt.Scale(
-                    scheme="redyellowgreen"
-                ),
-            ),
-            tooltip=[
-                alt.Tooltip(
-                    "display_ticker:N",
-                    title="Ticker",
-                ),
-                alt.Tooltip(
-                    "company:N",
-                    title="Company",
-                ),
-                alt.Tooltip(
-                    "unrealised_pnl:Q",
-                    title="P/L",
-                    format=",.2f",
-                ),
-                alt.Tooltip(
-                    "return_pct:Q",
-                    title="Return",
-                    format=".2%",
-                ),
-            ],
-        )
-        .properties(
-            height=350,
-        )
+with col1:
+
+    st.metric(
+        "Money-weighted return",
+        (
+            f"{returns['money_weighted_return_pct']:.2f}%"
+        ),
     )
 
-    st.altair_chart(
-        pnl_chart,
-        width="stretch",
+with col2:
+
+    st.metric(
+        "S&P 500 CAGR",
+        (
+            f"{returns['benchmark_cagr_pct']:.2f}%"
+        ),
+    )
+
+with col3:
+
+    st.metric(
+        "S&P 500 MWR",
+        (
+            f"{returns['benchmark_mwr_pct']:.2f}%"
+        ),
+    )
+
+with col4:
+
+    st.metric(
+        "Period",
+        (
+            f"{returns['elapsed_days']} days"
+        ),
     )
 
 
 st.divider()
 
-st.subheader("Current Holdings")
+
+# ------------------------------------------------------------
+# Risk
+# ------------------------------------------------------------
+
+st.subheader("Risk")
+
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+
+    st.metric(
+        "Annualised volatility",
+        (
+            f"{risk['annualised_volatility_pct']:.2f}%"
+        ),
+    )
+
+with col2:
+
+    st.metric(
+        "Beta",
+        f"{risk['beta']:.2f}",
+    )
+
+with col3:
+
+    st.metric(
+        "Sharpe ratio",
+        f"{risk['sharpe_ratio']:.2f}",
+    )
+
+with col4:
+
+    st.metric(
+        "Sortino ratio",
+        f"{risk['sortino_ratio']:.2f}",
+    )
 
 
-display_portfolio = portfolio[
-    [
-        "display_ticker",
-        "company",
-        "quantity",
-        "instrument_currency",
-        "average_price",
-        "current_price",
-        "total_cost",
-        "current_value",
-        "unrealised_pnl",
-        "return_pct",
-        "weight",
-    ]
-].copy()
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+
+    st.metric(
+        "Max drawdown",
+        (
+            f"{risk['max_drawdown_pct']:.2f}%"
+        ),
+    )
+
+with col2:
+
+    st.metric(
+        "Longest drawdown",
+        (
+            f"{risk['max_drawdown_duration_days']} days"
+        ),
+    )
+
+with col3:
+
+    st.metric(
+        "95% daily VaR",
+        (
+            f"{risk['historical_var_pct']:.2f}%"
+        ),
+    )
+
+with col4:
+
+    st.metric(
+        "95% daily VaR",
+        (
+            f"€{risk['historical_var_eur']:,.2f}"
+        ),
+    )
 
 
-display_portfolio["Average Price"] = display_portfolio.apply(
-    lambda row: (
-        f"{row['instrument_currency']} "
-        f"{row['average_price']:,.2f}"
-    ),
-    axis=1,
-)
+# ------------------------------------------------------------
+# Account reconciliation
+# ------------------------------------------------------------
 
-display_portfolio["Current Price"] = display_portfolio.apply(
-    lambda row: (
-        f"{row['instrument_currency']} "
-        f"{row['current_price']:,.2f}"
-    ),
-    axis=1,
-)
+with st.expander(
+    "Trading 212 account breakdown"
+):
 
-display_portfolio["Cost"] = display_portfolio[
-    "total_cost"
-].map(
-    lambda value: f"{currency_symbol}{value:,.2f}"
-)
+    col1, col2, col3, col4 = (
+        st.columns(4)
+    )
 
-display_portfolio["Current Value"] = display_portfolio[
-    "current_value"
-].map(
-    lambda value: f"{currency_symbol}{value:,.2f}"
-)
+    with col1:
 
-display_portfolio["Unrealised P/L"] = display_portfolio[
-    "unrealised_pnl"
-].map(
-    lambda value: f"{currency_symbol}{value:,.2f}"
-)
+        st.metric(
+            "Investments",
+            f"€{investments:,.2f}",
+        )
 
-display_portfolio["Return"] = display_portfolio[
-    "return_pct"
-].map(
-    lambda value: f"{value:.2%}"
-)
+    with col2:
 
-display_portfolio["Weight"] = display_portfolio[
-    "weight"
-].map(
-    lambda value: f"{value:.2%}"
-)
+        st.metric(
+            "Available cash",
+            f"€{visible_cash:,.2f}",
+        )
 
+    with col3:
 
-display_portfolio = display_portfolio[
-    [
-        "display_ticker",
-        "company",
-        "quantity",
-        "Average Price",
-        "Current Price",
-        "Cost",
-        "Current Value",
-        "Unrealised P/L",
-        "Return",
-        "Weight",
-    ]
-]
+        st.metric(
+            "Other balance",
+            f"€{other_balance:,.2f}",
+        )
 
+    with col4:
 
-display_portfolio.columns = [
-    "Ticker",
-    "Company",
-    "Quantity",
-    "Average Price",
-    "Current Price",
-    "Cost",
-    "Current Value",
-    "Unrealised P/L",
-    "Return",
-    "Weight",
-]
-
-
-st.dataframe(
-    display_portfolio,
-    width="stretch",
-    hide_index=True,
-)
+        st.metric(
+            "Total",
+            f"€{live_total:,.2f}",
+        )
