@@ -14,10 +14,18 @@ CACHE_DIRECTORY = (
 CACHE_LIFETIME_SECONDS = 60 * 60 * 6
 
 
+# Yahoo symbols are quoted as:
+# 1 EUR = X units of the foreign currency.
+#
+# We invert the downloaded value later so that
+# rate_to_eur means:
+#
+# 1 unit of foreign currency = X EUR.
 FX_SYMBOLS = {
     "USD": "EURUSD=X",
     "GBP": "EURGBP=X",
     "CAD": "EURCAD=X",
+    "CHF": "EURCHF=X",
 }
 
 
@@ -45,13 +53,23 @@ def _cache_is_fresh(
         - path.stat().st_mtime
     )
 
-    return age_seconds < max_age_seconds
+    return (
+        age_seconds
+        < max_age_seconds
+    )
 
 
 def _download_fx_history(
     currency,
     start_date,
 ):
+    currency = (
+        str(currency)
+        .strip()
+        .upper()
+    )
+
+    # EUR requires no conversion.
     if currency == "EUR":
 
         dates = pd.date_range(
@@ -74,9 +92,11 @@ def _download_fx_history(
             f"{currency}"
         )
 
-    yahoo_symbol = FX_SYMBOLS[
-        currency
-    ]
+    yahoo_symbol = (
+        FX_SYMBOLS[
+            currency
+        ]
+    )
 
     ticker = yf.Ticker(
         yahoo_symbol
@@ -123,7 +143,9 @@ def _download_fx_history(
 
     history["eur_to_currency"] = (
         pd.to_numeric(
-            history["eur_to_currency"],
+            history[
+                "eur_to_currency"
+            ],
             errors="coerce",
         )
     )
@@ -136,15 +158,28 @@ def _download_fx_history(
     )
 
     history = history[
-        history["eur_to_currency"] > 0
+        history[
+            "eur_to_currency"
+        ] > 0
     ].copy()
 
+    # Yahoo gives:
+    #
+    # 1 EUR = X CHF / USD / GBP / CAD
+    #
+    # We want:
+    #
+    # 1 CHF / USD / GBP / CAD = X EUR
     history["rate_to_eur"] = (
         1.0
-        / history["eur_to_currency"]
+        / history[
+            "eur_to_currency"
+        ]
     )
 
-    history["currency"] = currency
+    history[
+        "currency"
+    ] = currency
 
     return history[
         [
@@ -161,6 +196,12 @@ def get_fx_history(
     force_refresh=False,
     max_age_seconds=CACHE_LIFETIME_SECONDS,
 ):
+    currency = (
+        str(currency)
+        .strip()
+        .upper()
+    )
+
     if currency == "EUR":
         return _download_fx_history(
             currency,
@@ -179,9 +220,12 @@ def get_fx_history(
         )
     ):
         try:
+
             cached = pd.read_csv(
                 path,
-                parse_dates=["date"],
+                parse_dates=[
+                    "date"
+                ],
             )
 
             if not cached.empty:
@@ -193,9 +237,11 @@ def get_fx_history(
         ):
             pass
 
-    history = _download_fx_history(
-        currency,
-        start_date,
+    history = (
+        _download_fx_history(
+            currency,
+            start_date,
+        )
     )
 
     history.to_csv(
@@ -213,9 +259,18 @@ def get_all_fx_history(
 ):
     histories = []
 
+    normalised_currencies = {
+        str(currency)
+        .strip()
+        .upper()
+        for currency in currencies
+        if pd.notna(currency)
+    }
+
     for currency in sorted(
-        set(currencies)
+        normalised_currencies
     ):
+
         history = get_fx_history(
             currency,
             start_date=start_date,
@@ -227,7 +282,13 @@ def get_all_fx_history(
         )
 
     if not histories:
-        return pd.DataFrame()
+        return pd.DataFrame(
+            columns=[
+                "date",
+                "currency",
+                "rate_to_eur",
+            ]
+        )
 
     return pd.concat(
         histories,
