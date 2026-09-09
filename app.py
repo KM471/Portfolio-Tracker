@@ -6,6 +6,17 @@ from performance_metrics import get_performance_metrics
 from return_metrics import get_return_metrics
 from period_analytics import get_all_period_analytics
 from holdings_comparison import get_holdings_comparison
+from dashboard_charts import (
+    render_value_charts,
+    render_capital_chart,
+    render_profit_chart,
+    render_drawdown_chart,
+    render_rolling_risk,
+    render_allocation_chart,
+    render_holding_returns,
+    render_beta_contribution,
+    render_risk_contribution,
+)
 
 
 st.set_page_config(
@@ -352,6 +363,33 @@ with col4:
         ),
     )
 
+
+st.divider()
+
+
+# ------------------------------------------------------------
+# Portfolio visual history
+# ------------------------------------------------------------
+
+st.subheader(
+    "Portfolio History"
+)
+
+render_value_charts(
+    history
+)
+
+st.divider()
+
+render_capital_chart(
+    history
+)
+
+st.divider()
+
+render_profit_chart(
+    history
+)
 
 st.divider()
 
@@ -743,6 +781,25 @@ with col4:
 
 
 # ------------------------------------------------------------
+# Historical risk charts
+# ------------------------------------------------------------
+
+st.divider()
+
+render_drawdown_chart(
+    history
+)
+
+st.divider()
+
+render_rolling_risk(
+    history
+)
+
+st.divider()
+
+
+# ------------------------------------------------------------
 # Period comparison
 # ------------------------------------------------------------
 
@@ -827,6 +884,41 @@ with st.expander(
         use_container_width=True,
     )
 
+
+st.divider()
+
+
+# ------------------------------------------------------------
+# Current holdings visual analytics
+# ------------------------------------------------------------
+
+st.subheader(
+    "Current Portfolio Breakdown"
+)
+
+render_allocation_chart(
+    holdings_table
+)
+
+st.divider()
+
+render_holding_returns(
+    holdings_table
+)
+
+st.divider()
+
+col1, col2 = st.columns(2)
+
+with col1:
+    render_beta_contribution(
+        holdings_table
+    )
+
+with col2:
+    render_risk_contribution(
+        holdings_table
+    )
 
 st.divider()
 

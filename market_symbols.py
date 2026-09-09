@@ -1,14 +1,15 @@
 TICKER_MAP = {
     # ---------------------------------------------------------
-    # Original portfolio mappings
+    # Core / original portfolio mappings
     # ---------------------------------------------------------
 
     "AAPL_US_EQ": "AAPL",
     "AMD_US_EQ": "AMD",
     "AMZN_US_EQ": "AMZN",
 
-    "BATS1_EQ": "BATS.L",
-    "BA1_EQ": "BA.L",
+    # Trading 212 uses lowercase L for these London listings
+    "BATSl_EQ": "BATS.L",
+    "BAl_EQ": "BA.L",
 
     "BEPC_US_EQ": "BEPC",
     "CPRT_US_EQ": "CPRT",
@@ -18,7 +19,8 @@ TICKER_MAP = {
     "FIG_US_EQ": "FIG",
     "FVAC_US_EQ": "MP",
 
-    "IPLT1_EQ": "IPLT.L",
+    # lowercase L
+    "IPLTl_EQ": "IPLT.L",
 
     "KOF_US_EQ": "KOF",
     "LOKB_US_EQ": "NVTS",
@@ -34,18 +36,21 @@ TICKER_MAP = {
     "PPTA_US_EQ": "PPTA",
     "QCOM_US_EQ": "QCOM",
 
-    "RR1_EQ": "RR.L",
+    # lowercase L
+    "RRl_EQ": "RR.L",
+
     "RYAAY_US_EQ": "RYAAY",
 
     "SAFp_EQ": "SAF.PA",
 
     "TSM_US_EQ": "TSM",
 
-    "VUAG1_EQ": "VUAG.L",
+    # lowercase L
+    "VUAGl_EQ": "VUAG.L",
 
 
     # ---------------------------------------------------------
-    # Dad's portfolio mappings
+    # Additional mappings discovered from second account
     # ---------------------------------------------------------
 
     "ABBNsEQ": "ABBN.SW",
@@ -73,10 +78,6 @@ TICKER_MAP = {
     "PLNHF_US_EQ": "PLNH",
 
     "RHMd_EQ": "RHM.DE",
-
-    # lowercase L
-    "RRl_EQ": "RR.L",
-
     "RRUd_EQ": "RRU.DE",
 
     # lowercase L
@@ -101,11 +102,19 @@ TICKER_MAP = {
     # ---------------------------------------------------------
     # Compatibility aliases
     # ---------------------------------------------------------
+    # These cost us nothing and protect against historical /
+    # account-specific ticker-code variants.
+
+    "BATS1_EQ": "BATS.L",
+    "BA1_EQ": "BA.L",
+    "IPLT1_EQ": "IPLT.L",
+    "VUAG1_EQ": "VUAG.L",
 
     "HSBA1_EQ": "HSBA.L",
     "RR1_EQ": "RR.L",
     "SPLT1_EQ": "SPLT.L",
     "VUSA1_EQ": "VUSA.L",
+
     "VWCEl_EQ": "VWCE.DE",
     "VWCED_EQ": "VWCE.DE",
 }
