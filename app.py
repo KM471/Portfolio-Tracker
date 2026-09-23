@@ -1,5 +1,6 @@
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 from trading212 import get_account_summary
 from performance_metrics import get_performance_metrics
@@ -26,9 +27,9 @@ st.set_page_config(
 )
 
 
-# ------------------------------------------------------------
-# Formatting
-# ------------------------------------------------------------
+# ============================================================
+# Formatting helpers
+# ============================================================
 
 def format_pct(value):
     if pd.isna(value):
@@ -59,22 +60,186 @@ def format_pp(value):
 
 
 def period_label(period):
-    labels = {
+    return {
         "FULL": "Full history",
         "1Y": "1 year",
         "3M": "3 months",
         "1M": "1 month",
-    }
-
-    return labels.get(
+    }.get(
         period,
         period,
     )
 
 
-# ------------------------------------------------------------
+def get_period_row(
+    period_table,
+    period,
+):
+    rows = period_table[
+        period_table[
+            "period"
+        ] == period
+    ]
+
+    if rows.empty:
+        return None
+
+    return rows.iloc[0]
+
+
+def metric_row(items):
+    columns = st.columns(
+        len(items)
+    )
+
+    for column, item in zip(
+        columns,
+        items,
+    ):
+        label = item[0]
+        value = item[1]
+
+        delta = (
+            item[2]
+            if len(item) > 2
+            else None
+        )
+
+        with column:
+            st.metric(
+                label,
+                value,
+                delta,
+            )
+
+
+# ============================================================
+# Compact allocation chart
+# ============================================================
+
+def render_compact_allocation(
+    holdings,
+):
+
+    allocation = (
+        holdings[
+            [
+                "display_ticker",
+                "current_value_eur",
+                "current_weight_pct",
+            ]
+        ]
+        .copy()
+        .dropna(
+            subset=[
+                "display_ticker",
+                "current_weight_pct",
+            ]
+        )
+        .sort_values(
+            "current_weight_pct",
+            ascending=False,
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+    if allocation.empty:
+        st.info(
+            "No current holdings available."
+        )
+        return
+
+    # Keep the front page chart simple.
+    # Show the five largest positions
+    # and combine the remainder as Other.
+    if len(allocation) > 5:
+
+        top = allocation.head(
+            5
+        ).copy()
+
+        remainder = allocation.iloc[
+            5:
+        ]
+
+        other = pd.DataFrame(
+            {
+                "display_ticker": [
+                    "Other"
+                ],
+                "current_value_eur": [
+                    remainder[
+                        "current_value_eur"
+                    ].sum()
+                ],
+                "current_weight_pct": [
+                    remainder[
+                        "current_weight_pct"
+                    ].sum()
+                ],
+            }
+        )
+
+        allocation = pd.concat(
+            [
+                top,
+                other,
+            ],
+            ignore_index=True,
+        )
+
+    chart = (
+        alt.Chart(
+            allocation
+        )
+        .mark_arc(
+            innerRadius=55,
+        )
+        .encode(
+            theta=alt.Theta(
+                "current_weight_pct:Q"
+            ),
+            color=alt.Color(
+                "display_ticker:N",
+                title=None,
+                legend=alt.Legend(
+                    orient="bottom",
+                    columns=3,
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip(
+                    "display_ticker:N",
+                    title="Holding",
+                ),
+                alt.Tooltip(
+                    "current_weight_pct:Q",
+                    title="Weight",
+                    format=".1f",
+                ),
+                alt.Tooltip(
+                    "current_value_eur:Q",
+                    title="Value €",
+                    format=",.2f",
+                ),
+            ],
+        )
+        .properties(
+            height=240,
+        )
+    )
+
+    st.altair_chart(
+        chart,
+        use_container_width=True,
+    )
+
+
+# ============================================================
 # Data loading
-# ------------------------------------------------------------
+# ============================================================
 
 @st.cache_data(
     ttl=600,
@@ -86,9 +251,13 @@ def load_dashboard_data():
         get_performance_metrics()
     )
 
-    returns = get_return_metrics()
+    returns = (
+        get_return_metrics()
+    )
 
-    live_account = get_account_summary()
+    live_account = (
+        get_account_summary()
+    )
 
     period_analytics = (
         get_all_period_analytics()
@@ -110,15 +279,18 @@ def load_dashboard_data():
     )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Header
-# ------------------------------------------------------------
+# ============================================================
 
-header_col1, header_col2 = st.columns(
-    [6, 1]
+header_left, header_right = (
+    st.columns(
+        [6, 1]
+    )
 )
 
-with header_col1:
+
+with header_left:
 
     st.title(
         "Portfolio Intelligence"
@@ -129,7 +301,8 @@ with header_col1:
         "benchmarking and risk analytics."
     )
 
-with header_col2:
+
+with header_right:
 
     if st.button(
         "Refresh data",
@@ -138,21 +311,17 @@ with header_col2:
 
         load_dashboard_data.clear()
 
-        if (
-            "dashboard_data"
-            in st.session_state
-        ):
-
-            del st.session_state[
-                "dashboard_data"
-            ]
+        st.session_state.pop(
+            "dashboard_data",
+            None,
+        )
 
         st.rerun()
 
 
-# ------------------------------------------------------------
-# Load dashboard once
-# ------------------------------------------------------------
+# ============================================================
+# Load dashboard
+# ============================================================
 
 if (
     "dashboard_data"
@@ -192,9 +361,9 @@ if (
 ]
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Live account values
-# ------------------------------------------------------------
+# ============================================================
 
 live_total = float(
     live.get(
@@ -205,10 +374,14 @@ live_total = float(
     )
 )
 
-investment_data = live.get(
-    "investments",
-    {},
+
+investment_data = (
+    live.get(
+        "investments",
+        {},
+    )
 )
+
 
 investments = float(
     investment_data.get(
@@ -217,6 +390,7 @@ investments = float(
     )
 )
 
+
 unrealised_pnl = float(
     investment_data.get(
         "unrealizedProfitLoss",
@@ -224,43 +398,49 @@ unrealised_pnl = float(
     )
 )
 
-cash_data = live.get(
-    "cash",
-    {},
-)
 
-available_cash = float(
-    cash_data.get(
-        "availableToTrade",
-        0.0,
+cash_data = (
+    live.get(
+        "cash",
+        {},
     )
 )
 
-reserved_cash = float(
-    cash_data.get(
-        "reservedForOrders",
-        0.0,
-    )
-)
-
-pie_cash = float(
-    cash_data.get(
-        "inPies",
-        0.0,
-    )
-)
 
 visible_cash = (
-    available_cash
-    + reserved_cash
-    + pie_cash
+    float(
+        cash_data.get(
+            "availableToTrade",
+            0.0,
+        )
+    )
+    +
+    float(
+        cash_data.get(
+            "reservedForOrders",
+            0.0,
+        )
+    )
+    +
+    float(
+        cash_data.get(
+            "inPies",
+            0.0,
+        )
+    )
 )
+
 
 other_balance = (
     live_total
     - investments
     - visible_cash
 )
+
+
+# ============================================================
+# MAIN DASHBOARD
+# ============================================================
 
 
 # ------------------------------------------------------------
@@ -271,313 +451,76 @@ st.subheader(
     "Overview"
 )
 
-col1, col2, col3, col4 = (
-    st.columns(4)
-)
 
-with col1:
-
-    st.metric(
-        "Account value",
-        format_eur(
-            live_total
-        ),
+overview_left, overview_right = (
+    st.columns(
+        [
+            3.2,
+            1.25,
+        ]
     )
-
-with col2:
-
-    st.metric(
-        "Net capital invested",
-        format_eur(
-            performance[
-                "net_capital_invested_eur"
-            ]
-        ),
-    )
-
-with col3:
-
-    st.metric(
-        "Total account gain",
-        format_eur(
-            performance[
-                "simple_gain_eur"
-            ]
-        ),
-        format_pct(
-            performance[
-                "simple_return_pct"
-            ]
-        ),
-    )
-
-with col4:
-
-    st.metric(
-        "Peak capital invested",
-        format_eur(
-            performance[
-                "peak_net_capital_eur"
-            ]
-        ),
-    )
-
-
-col1, col2, col3, col4 = (
-    st.columns(4)
-)
-
-with col1:
-
-    st.metric(
-        "Investments",
-        format_eur(
-            investments
-        ),
-    )
-
-with col2:
-
-    st.metric(
-        "Available cash",
-        format_eur(
-            visible_cash
-        ),
-    )
-
-with col3:
-
-    st.metric(
-        "Other balance",
-        format_eur(
-            other_balance
-        ),
-    )
-
-with col4:
-
-    st.metric(
-        "Unrealised P/L",
-        format_eur(
-            unrealised_pnl
-        ),
-    )
-
-
-st.divider()
-
-
-# ------------------------------------------------------------
-# Portfolio visual history
-# ------------------------------------------------------------
-
-st.subheader(
-    "Portfolio History"
-)
-
-render_value_charts(
-    history
-)
-
-st.divider()
-
-render_capital_chart(
-    history
-)
-
-st.divider()
-
-render_profit_chart(
-    history
-)
-
-st.divider()
-
-
-# ------------------------------------------------------------
-# Actual historical portfolio
-# ------------------------------------------------------------
-
-st.subheader(
-    "Actual Portfolio Analytics"
-)
-
-st.caption(
-    "Performance and risk based on the positions "
-    "and weights you actually held during each period."
 )
 
 
-selected_period = st.radio(
-    "Analysis period",
-    options=[
-        "FULL",
-        "1Y",
-        "3M",
-        "1M",
-    ],
-    horizontal=True,
-    format_func=period_label,
-    key="actual_portfolio_period",
-)
+with overview_left:
 
-
-period_rows = period_table[
-    period_table[
-        "period"
-    ] == selected_period
-]
-
-
-if period_rows.empty:
-
-    st.error(
-        "No analytics are available "
-        "for this period."
+    st.caption(
+        "TWR measures investment performance independently "
+        "of deposits and withdrawals."
     )
 
-    st.stop()
-
-
-selected = (
-    period_rows.iloc[0]
-)
-
-
-first_date = pd.to_datetime(
-    selected[
-        "first_date"
-    ]
-).date()
-
-last_date = pd.to_datetime(
-    selected[
-        "last_date"
-    ]
-).date()
-
-
-st.caption(
-    f"{first_date} → {last_date} | "
-    f"{int(selected['trading_observations'])} "
-    f"trading observations"
-)
-
-
-# ------------------------------------------------------------
-# Performance
-# ------------------------------------------------------------
-
-st.markdown(
-    "### Performance"
-)
-
-
-col1, col2, col3, col4 = (
-    st.columns(4)
-)
-
-with col1:
-
-    st.metric(
-        "Portfolio return (TWR)",
-        format_pct(
-            selected[
-                "portfolio_twr_pct"
-            ]
-        ),
+    row1 = st.columns(
+        3
     )
 
-with col2:
+    with row1[0]:
 
-    st.metric(
-        "Investment profit",
-        format_eur(
-            selected[
-                "portfolio_profit_eur"
-            ]
-        ),
+        st.metric(
+            "Account value",
+            format_eur(
+                live_total
+            ),
+        )
+
+    with row1[1]:
+
+        st.metric(
+            "Portfolio TWR",
+            format_pct(
+                performance[
+                    "portfolio_twr_pct"
+                ]
+            ),
+        )
+
+    with row1[2]:
+
+        st.metric(
+            "Investment profit",
+            format_eur(
+                performance[
+                    "simple_gain_eur"
+                ]
+            ),
+        )
+
+
+    row2 = st.columns(
+        3
     )
 
-with col3:
+    with row2[0]:
 
-    st.metric(
-        "S&P 500 return",
-        format_pct(
-            selected[
-                "benchmark_twr_pct"
-            ]
-        ),
-    )
+        st.metric(
+            "Net capital invested",
+            format_eur(
+                performance[
+                    "net_capital_invested_eur"
+                ]
+            ),
+        )
 
-with col4:
-
-    st.metric(
-        "Outperformance",
-        format_pp(
-            selected[
-                "relative_return_pp"
-            ]
-        ),
-    )
-
-
-col1, col2, col3, col4 = (
-    st.columns(4)
-)
-
-with col1:
-
-    st.metric(
-        "Portfolio CAGR",
-        format_pct(
-            selected[
-                "portfolio_cagr_pct"
-            ]
-        ),
-    )
-
-with col2:
-
-    st.metric(
-        "S&P 500 CAGR",
-        format_pct(
-            selected[
-                "benchmark_cagr_pct"
-            ]
-        ),
-    )
-
-with col3:
-
-    st.metric(
-        "Best portfolio day",
-        format_pct(
-            selected[
-                "best_day_pct"
-            ]
-        ),
-    )
-
-with col4:
-
-    st.metric(
-        "Worst portfolio day",
-        format_pct(
-            selected[
-                "worst_day_pct"
-            ]
-        ),
-    )
-
-
-if selected_period == "FULL":
-
-    col1, col2, col3, col4 = (
-        st.columns(4)
-    )
-
-    with col1:
+    with row2[1]:
 
         st.metric(
             "Money-weighted return",
@@ -588,339 +531,739 @@ if selected_period == "FULL":
             ),
         )
 
-    with col2:
+    with row2[2]:
 
         st.metric(
-            "S&P 500 MWR",
-            format_pct(
-                returns[
-                    "benchmark_mwr_pct"
-                ]
-            ),
-        )
-
-    with col3:
-
-        st.metric(
-            "History length",
-            (
-                f"{returns['elapsed_days']} "
-                f"days"
-            ),
-        )
-
-    with col4:
-
-        st.metric(
-            "External cash flow",
+            "Unrealised P/L",
             format_eur(
-                selected[
-                    "external_flows_eur"
-                ]
+                unrealised_pnl
             ),
         )
+
+
+with overview_right:
+
+    st.markdown(
+        "**Current allocation**"
+    )
+
+    render_compact_allocation(
+        holdings_table
+    )
 
 
 # ------------------------------------------------------------
-# Risk
+# Recent performance
 # ------------------------------------------------------------
 
 st.markdown(
-    "### Risk"
-)
-
-st.caption(
-    "Your portfolio risk is shown directly beside "
-    "the S&P 500 where a useful comparison exists."
+    "**Recent performance**"
 )
 
 
-col1, col2, col3, col4 = (
-    st.columns(4)
+row_1m = (
+    get_period_row(
+        period_table,
+        "1M",
+    )
 )
 
-with col1:
-
-    st.metric(
-        "Portfolio volatility",
-        format_pct(
-            selected[
-                "annualised_volatility_pct"
-            ]
-        ),
+row_3m = (
+    get_period_row(
+        period_table,
+        "3M",
     )
-
-with col2:
-
-    st.metric(
-        "S&P 500 volatility",
-        format_pct(
-            selected[
-                "benchmark_volatility_pct"
-            ]
-        ),
-    )
-
-with col3:
-
-    st.metric(
-        "Portfolio beta",
-        format_number(
-            selected[
-                "beta"
-            ]
-        ),
-    )
-
-with col4:
-
-    st.metric(
-        "Correlation to S&P 500",
-        format_number(
-            selected[
-                "correlation"
-            ]
-        ),
-    )
-
-
-col1, col2, col3, col4 = (
-    st.columns(4)
 )
 
-with col1:
-
-    st.metric(
-        "Portfolio max drawdown",
-        format_pct(
-            selected[
-                "max_drawdown_pct"
-            ]
-        ),
+row_1y = (
+    get_period_row(
+        period_table,
+        "1Y",
     )
+)
 
-with col2:
 
-    st.metric(
-        "S&P 500 max drawdown",
-        format_pct(
-            selected[
-                "benchmark_max_drawdown_pct"
-            ]
-        ),
-    )
+recent_items = []
 
-with col3:
 
-    st.metric(
-        "Portfolio drawdown duration",
+if row_1m is not None:
+
+    recent_items.append(
         (
-            f"{int(selected['max_drawdown_duration_days'])} "
-            f"days"
-        ),
+            "1 month",
+            format_pct(
+                row_1m[
+                    "portfolio_twr_pct"
+                ]
+            ),
+            (
+                f"{row_1m['relative_return_pp']:+.2f} pp vs S&P"
+            ),
+        )
     )
 
-with col4:
 
-    st.metric(
-        "S&P drawdown duration",
+if row_3m is not None:
+
+    recent_items.append(
         (
-            f"{int(selected['benchmark_drawdown_duration_days'])} "
-            f"days"
-        ),
+            "3 months",
+            format_pct(
+                row_3m[
+                    "portfolio_twr_pct"
+                ]
+            ),
+            (
+                f"{row_3m['relative_return_pp']:+.2f} pp vs S&P"
+            ),
+        )
     )
 
 
-col1, col2, col3, col4 = (
-    st.columns(4)
-)
+if row_1y is not None:
 
-with col1:
-
-    st.metric(
-        "Sharpe ratio",
-        format_number(
-            selected[
-                "sharpe_ratio"
-            ]
-        ),
+    recent_items.append(
+        (
+            "1 year",
+            format_pct(
+                row_1y[
+                    "portfolio_twr_pct"
+                ]
+            ),
+            (
+                f"{row_1y['relative_return_pp']:+.2f} pp vs S&P"
+            ),
+        )
     )
 
-with col2:
 
-    st.metric(
-        "Sortino ratio",
-        format_number(
-            selected[
-                "sortino_ratio"
-            ]
-        ),
-    )
-
-with col3:
-
-    st.metric(
-        "95% daily VaR",
+recent_items.append(
+    (
+        "Full-history CAGR",
         format_pct(
-            selected[
-                "historical_var_pct"
+            returns[
+                "portfolio_cagr_pct"
             ]
         ),
     )
-
-with col4:
-
-    st.metric(
-        "95% daily VaR",
-        format_eur(
-            selected[
-                "historical_var_eur"
-            ]
-        ),
-    )
-
-
-# ------------------------------------------------------------
-# Historical risk charts
-# ------------------------------------------------------------
-
-st.divider()
-
-render_drawdown_chart(
-    history
 )
 
-st.divider()
 
-render_rolling_risk(
-    history
+metric_row(
+    recent_items
 )
-
-st.divider()
 
 
 # ------------------------------------------------------------
-# Period comparison
+# Account details
 # ------------------------------------------------------------
 
 with st.expander(
-    "Compare all periods"
+    "Account details"
 ):
 
-    comparison_display = period_table[
+    metric_row(
         [
-            "period",
-            "portfolio_twr_pct",
-            "benchmark_twr_pct",
-            "relative_return_pp",
-            "annualised_volatility_pct",
-            "benchmark_volatility_pct",
-            "beta",
-            "correlation",
-            "sharpe_ratio",
-            "sortino_ratio",
-            "max_drawdown_pct",
-            "benchmark_max_drawdown_pct",
+            (
+                "Investments",
+                format_eur(
+                    investments
+                ),
+            ),
+            (
+                "Available cash",
+                format_eur(
+                    visible_cash
+                ),
+            ),
+            (
+                "Peak capital invested",
+                format_eur(
+                    performance[
+                        "peak_net_capital_eur"
+                    ]
+                ),
+            ),
+            (
+                "Other balance",
+                format_eur(
+                    other_balance
+                ),
+            ),
         ]
-    ].copy()
-
-
-    comparison_display[
-        "period"
-    ] = comparison_display[
-        "period"
-    ].map(
-        period_label
     )
 
 
-    comparison_display = (
-        comparison_display.rename(
+st.divider()
+
+
+# ------------------------------------------------------------
+# Benchmark
+# ------------------------------------------------------------
+
+st.subheader(
+    "S&P 500 Benchmark"
+)
+
+
+metric_row(
+    [
+        (
+            "Portfolio TWR",
+            format_pct(
+                performance[
+                    "portfolio_twr_pct"
+                ]
+            ),
+        ),
+        (
+            "S&P 500 TWR",
+            format_pct(
+                performance[
+                    "benchmark_twr_pct"
+                ]
+            ),
+        ),
+        (
+            "Outperformance",
+            format_pp(
+                performance[
+                    "relative_return_pp"
+                ]
+            ),
+        ),
+    ]
+)
+
+
+render_value_charts(
+    history
+)
+
+
+st.divider()
+
+
+# ============================================================
+# DETAILED ANALYTICS
+# ============================================================
+
+
+# ------------------------------------------------------------
+# Detailed performance + risk
+# ------------------------------------------------------------
+
+with st.expander(
+    "Detailed Performance & Risk Analytics"
+):
+
+    st.caption(
+        "Historical performance and risk statistics "
+        "for the actual portfolio held during each period."
+    )
+
+
+    period = st.radio(
+        "Analysis period",
+        [
+            "FULL",
+            "1Y",
+            "3M",
+            "1M",
+        ],
+        horizontal=True,
+        format_func=period_label,
+        key="detailed_period",
+    )
+
+
+    selected = (
+        get_period_row(
+            period_table,
+            period,
+        )
+    )
+
+
+    if selected is not None:
+
+        first_date = pd.to_datetime(
+            selected[
+                "first_date"
+            ]
+        ).date()
+
+        last_date = pd.to_datetime(
+            selected[
+                "last_date"
+            ]
+        ).date()
+
+
+        st.caption(
+            f"{first_date} → {last_date} | "
+            f"{int(selected['trading_observations'])} "
+            f"trading observations"
+        )
+
+
+        st.markdown(
+            "#### Performance"
+        )
+
+
+        metric_row(
+            [
+                (
+                    "Portfolio return (TWR)",
+                    format_pct(
+                        selected[
+                            "portfolio_twr_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "Investment profit",
+                    format_eur(
+                        selected[
+                            "portfolio_profit_eur"
+                        ]
+                    ),
+                ),
+                (
+                    "S&P 500 return",
+                    format_pct(
+                        selected[
+                            "benchmark_twr_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "Outperformance",
+                    format_pp(
+                        selected[
+                            "relative_return_pp"
+                        ]
+                    ),
+                ),
+            ]
+        )
+
+
+        metric_row(
+            [
+                (
+                    "Portfolio CAGR",
+                    format_pct(
+                        selected[
+                            "portfolio_cagr_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "S&P 500 CAGR",
+                    format_pct(
+                        selected[
+                            "benchmark_cagr_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "Best portfolio day",
+                    format_pct(
+                        selected[
+                            "best_day_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "Worst portfolio day",
+                    format_pct(
+                        selected[
+                            "worst_day_pct"
+                        ]
+                    ),
+                ),
+            ]
+        )
+
+
+        if period == "FULL":
+
+            metric_row(
+                [
+                    (
+                        "Money-weighted return",
+                        format_pct(
+                            returns[
+                                "money_weighted_return_pct"
+                            ]
+                        ),
+                    ),
+                    (
+                        "S&P 500 MWR",
+                        format_pct(
+                            returns[
+                                "benchmark_mwr_pct"
+                            ]
+                        ),
+                    ),
+                    (
+                        "History length",
+                        (
+                            f"{returns['elapsed_days']} days"
+                        ),
+                    ),
+                    (
+                        "External cash flow",
+                        format_eur(
+                            selected[
+                                "external_flows_eur"
+                            ]
+                        ),
+                    ),
+                ]
+            )
+
+
+        st.markdown(
+            "#### Risk"
+        )
+
+
+        metric_row(
+            [
+                (
+                    "Portfolio volatility",
+                    format_pct(
+                        selected[
+                            "annualised_volatility_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "S&P 500 volatility",
+                    format_pct(
+                        selected[
+                            "benchmark_volatility_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "Portfolio beta",
+                    format_number(
+                        selected[
+                            "beta"
+                        ]
+                    ),
+                ),
+                (
+                    "Correlation to S&P 500",
+                    format_number(
+                        selected[
+                            "correlation"
+                        ]
+                    ),
+                ),
+            ]
+        )
+
+
+        metric_row(
+            [
+                (
+                    "Portfolio max drawdown",
+                    format_pct(
+                        selected[
+                            "max_drawdown_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "S&P max drawdown",
+                    format_pct(
+                        selected[
+                            "benchmark_max_drawdown_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "Portfolio drawdown duration",
+                    (
+                        f"{int(selected['max_drawdown_duration_days'])} days"
+                    ),
+                ),
+                (
+                    "S&P drawdown duration",
+                    (
+                        f"{int(selected['benchmark_drawdown_duration_days'])} days"
+                    ),
+                ),
+            ]
+        )
+
+
+        metric_row(
+            [
+                (
+                    "Sharpe ratio",
+                    format_number(
+                        selected[
+                            "sharpe_ratio"
+                        ]
+                    ),
+                ),
+                (
+                    "Sortino ratio",
+                    format_number(
+                        selected[
+                            "sortino_ratio"
+                        ]
+                    ),
+                ),
+                (
+                    "95% daily VaR",
+                    format_pct(
+                        selected[
+                            "historical_var_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "95% daily VaR",
+                    format_eur(
+                        selected[
+                            "historical_var_eur"
+                        ]
+                    ),
+                ),
+            ]
+        )
+
+
+        st.markdown(
+            "#### Risk Charts"
+        )
+
+
+        render_drawdown_chart(
+            history
+        )
+
+
+        render_rolling_risk(
+            history
+        )
+
+
+        st.markdown(
+            "#### Compare All Periods"
+        )
+
+
+        compare = (
+            period_table[
+                [
+                    "period",
+                    "portfolio_twr_pct",
+                    "benchmark_twr_pct",
+                    "relative_return_pp",
+                    "annualised_volatility_pct",
+                    "benchmark_volatility_pct",
+                    "beta",
+                    "correlation",
+                    "sharpe_ratio",
+                    "sortino_ratio",
+                    "max_drawdown_pct",
+                    "benchmark_max_drawdown_pct",
+                ]
+            ]
+            .copy()
+            .rename(
+                columns={
+                    "period":
+                        "Period",
+                    "portfolio_twr_pct":
+                        "Portfolio Return %",
+                    "benchmark_twr_pct":
+                        "S&P Return %",
+                    "relative_return_pp":
+                        "Outperformance pp",
+                    "annualised_volatility_pct":
+                        "Portfolio Volatility %",
+                    "benchmark_volatility_pct":
+                        "S&P Volatility %",
+                    "beta":
+                        "Beta",
+                    "correlation":
+                        "S&P Correlation",
+                    "sharpe_ratio":
+                        "Sharpe",
+                    "sortino_ratio":
+                        "Sortino",
+                    "max_drawdown_pct":
+                        "Portfolio Drawdown %",
+                    "benchmark_max_drawdown_pct":
+                        "S&P Drawdown %",
+                }
+            )
+        )
+
+
+        compare[
+            "Period"
+        ] = compare[
+            "Period"
+        ].map(
+            period_label
+        )
+
+
+        st.dataframe(
+            compare.round(2),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+
+# ------------------------------------------------------------
+# Capital and profit
+# ------------------------------------------------------------
+
+with st.expander(
+    "Capital & Profit History"
+):
+
+    st.caption(
+        "Tracks invested capital and investment profit "
+        "through deposits and withdrawals."
+    )
+
+
+    render_capital_chart(
+        history
+    )
+
+
+    render_profit_chart(
+        history
+    )
+
+
+# ------------------------------------------------------------
+# Holdings analytics
+# ------------------------------------------------------------
+
+with st.expander(
+    "Current Holdings & Risk Breakdown"
+):
+
+    st.caption(
+        "Detailed analytics for the positions currently "
+        "held in the portfolio."
+    )
+
+
+    render_allocation_chart(
+        holdings_table
+    )
+
+
+    render_holding_returns(
+        holdings_table
+    )
+
+
+    col1, col2 = (
+        st.columns(2)
+    )
+
+
+    with col1:
+
+        render_beta_contribution(
+            holdings_table
+        )
+
+
+    with col2:
+
+        render_risk_contribution(
+            holdings_table
+        )
+
+
+    st.markdown(
+        "#### Full Holding Statistics"
+    )
+
+
+    holding_period = st.radio(
+        "Holding statistics period",
+        [
+            "1M",
+            "3M",
+            "1Y",
+        ],
+        horizontal=True,
+        format_func=period_label,
+        key="holding_period",
+    )
+
+
+    suffix = (
+        holding_period.lower()
+    )
+
+
+    holding_display = (
+        holdings_table[
+            [
+                "display_ticker",
+                "company",
+                "current_value_eur",
+                "current_weight_pct",
+                f"return_{suffix}_pct",
+                f"beta_{suffix}",
+                f"beta_contribution_{suffix}",
+                f"volatility_{suffix}_pct",
+                f"correlation_{suffix}",
+                f"risk_contribution_{suffix}_pct",
+            ]
+        ]
+        .copy()
+        .rename(
             columns={
-                "period":
-                    "Period",
-
-                "portfolio_twr_pct":
-                    "Portfolio Return %",
-
-                "benchmark_twr_pct":
-                    "S&P Return %",
-
-                "relative_return_pp":
-                    "Outperformance pp",
-
-                "annualised_volatility_pct":
-                    "Portfolio Volatility %",
-
-                "benchmark_volatility_pct":
-                    "S&P Volatility %",
-
-                "beta":
+                "display_ticker":
+                    "Ticker",
+                "company":
+                    "Company",
+                "current_value_eur":
+                    "Value €",
+                "current_weight_pct":
+                    "Weight %",
+                f"return_{suffix}_pct":
+                    "Return %",
+                f"beta_{suffix}":
                     "Beta",
-
-                "correlation":
+                f"beta_contribution_{suffix}":
+                    "Beta Contribution",
+                f"volatility_{suffix}_pct":
+                    "Volatility %",
+                f"correlation_{suffix}":
                     "S&P Correlation",
-
-                "sharpe_ratio":
-                    "Sharpe",
-
-                "sortino_ratio":
-                    "Sortino",
-
-                "max_drawdown_pct":
-                    "Portfolio Drawdown %",
-
-                "benchmark_max_drawdown_pct":
-                    "S&P Drawdown %",
+                f"risk_contribution_{suffix}_pct":
+                    "Risk Contribution %",
             }
         )
-        .round(2)
     )
 
 
     st.dataframe(
-        comparison_display,
+        holding_display.round(2),
         hide_index=True,
         use_container_width=True,
     )
-
-
-st.divider()
-
-
-# ------------------------------------------------------------
-# Current holdings visual analytics
-# ------------------------------------------------------------
-
-st.subheader(
-    "Current Portfolio Breakdown"
-)
-
-render_allocation_chart(
-    holdings_table
-)
-
-st.divider()
-
-render_holding_returns(
-    holdings_table
-)
-
-st.divider()
-
-col1, col2 = st.columns(2)
-
-with col1:
-    render_beta_contribution(
-        holdings_table
-    )
-
-with col2:
-    render_risk_contribution(
-        holdings_table
-    )
-
-st.divider()
 
 
 # ------------------------------------------------------------
@@ -932,23 +1275,22 @@ with st.expander(
 ):
 
     st.caption(
-        "This takes the portfolio you own today, "
-        "keeps today's weights constant, and asks "
-        "how that exact portfolio would have behaved "
-        "historically. It is not your actual past performance."
+        "This is not your actual historical performance. "
+        "It holds today's positions and weights constant "
+        "through the selected historical period."
     )
 
 
-    current_period = st.radio(
+    backtest_period = st.radio(
         "Backtest period",
-        options=[
+        [
             "1M",
             "3M",
             "1Y",
         ],
         horizontal=True,
         format_func=period_label,
-        key="current_holdings_backtest_period",
+        key="backtest_period",
     )
 
 
@@ -956,15 +1298,16 @@ with st.expander(
         current_holdings_table[
             current_holdings_table[
                 "period"
-            ] == current_period
+            ] == backtest_period
         ]
     )
+
 
     actual_rows = (
         period_table[
             period_table[
                 "period"
-            ] == current_period
+            ] == backtest_period
         ]
     )
 
@@ -983,205 +1326,77 @@ with st.expander(
         )
 
 
-        st.markdown(
-            "### Portfolio Comparison"
+        metric_row(
+            [
+                (
+                    "Actual portfolio beta",
+                    format_number(
+                        actual[
+                            "beta"
+                        ]
+                    ),
+                ),
+                (
+                    "Current holdings beta",
+                    format_number(
+                        current[
+                            "beta"
+                        ]
+                    ),
+                ),
+                (
+                    "Actual volatility",
+                    format_pct(
+                        actual[
+                            "annualised_volatility_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "Current holdings volatility",
+                    format_pct(
+                        current[
+                            "annualised_volatility_pct"
+                        ]
+                    ),
+                ),
+            ]
         )
 
 
-        col1, col2, col3, col4 = (
-            st.columns(4)
+        metric_row(
+            [
+                (
+                    "Hypothetical return",
+                    format_pct(
+                        current[
+                            "current_portfolio_return_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "S&P 500 return",
+                    format_pct(
+                        current[
+                            "benchmark_return_pct"
+                        ]
+                    ),
+                ),
+                (
+                    "Hypothetical Sharpe",
+                    format_number(
+                        current[
+                            "sharpe_ratio"
+                        ]
+                    ),
+                ),
+                (
+                    "Hypothetical drawdown",
+                    format_pct(
+                        current[
+                            "max_drawdown_pct"
+                        ]
+                    ),
+                ),
+            ]
         )
-
-        with col1:
-
-            st.metric(
-                "Actual portfolio beta",
-                format_number(
-                    actual[
-                        "beta"
-                    ]
-                ),
-            )
-
-        with col2:
-
-            st.metric(
-                "Current holdings beta",
-                format_number(
-                    current[
-                        "beta"
-                    ]
-                ),
-            )
-
-        with col3:
-
-            st.metric(
-                "Actual volatility",
-                format_pct(
-                    actual[
-                        "annualised_volatility_pct"
-                    ]
-                ),
-            )
-
-        with col4:
-
-            st.metric(
-                "Current holdings volatility",
-                format_pct(
-                    current[
-                        "annualised_volatility_pct"
-                    ]
-                ),
-            )
-
-
-        col1, col2, col3, col4 = (
-            st.columns(4)
-        )
-
-        with col1:
-
-            st.metric(
-                "Hypothetical return",
-                format_pct(
-                    current[
-                        "current_portfolio_return_pct"
-                    ]
-                ),
-            )
-
-        with col2:
-
-            st.metric(
-                "S&P 500 return",
-                format_pct(
-                    current[
-                        "benchmark_return_pct"
-                    ]
-                ),
-            )
-
-        with col3:
-
-            st.metric(
-                "Hypothetical Sharpe",
-                format_number(
-                    current[
-                        "sharpe_ratio"
-                    ]
-                ),
-            )
-
-        with col4:
-
-            st.metric(
-                "Hypothetical drawdown",
-                format_pct(
-                    current[
-                        "max_drawdown_pct"
-                    ]
-                ),
-            )
-
-
-    st.markdown(
-        "### Current Holding Risk Breakdown"
-    )
-
-
-    suffix = (
-        current_period.lower()
-    )
-
-
-    holding_columns = [
-        "display_ticker",
-        "company",
-        "current_value_eur",
-        "current_weight_pct",
-        f"return_{suffix}_pct",
-        f"beta_{suffix}",
-        f"beta_contribution_{suffix}",
-        f"volatility_{suffix}_pct",
-        f"correlation_{suffix}",
-        f"risk_contribution_{suffix}_pct",
-    ]
-
-
-    holding_display = (
-        holdings_table[
-            holding_columns
-        ]
-        .copy()
-    )
-
-
-    holding_display = (
-        holding_display.rename(
-            columns={
-                "display_ticker":
-                    "Ticker",
-
-                "company":
-                    "Company",
-
-                "current_value_eur":
-                    "Value €",
-
-                "current_weight_pct":
-                    "Weight %",
-
-                f"return_{suffix}_pct":
-                    "Hypothetical Return %",
-
-                f"beta_{suffix}":
-                    "Beta",
-
-                f"beta_contribution_{suffix}":
-                    "Beta Contribution",
-
-                f"volatility_{suffix}_pct":
-                    "Volatility %",
-
-                f"correlation_{suffix}":
-                    "S&P Correlation",
-
-                f"risk_contribution_{suffix}_pct":
-                    "Risk Contribution %",
-            }
-        )
-    )
-
-
-    numeric_columns = [
-        "Value €",
-        "Weight %",
-        "Hypothetical Return %",
-        "Beta",
-        "Beta Contribution",
-        "Volatility %",
-        "S&P Correlation",
-        "Risk Contribution %",
-    ]
-
-
-    holding_display[
-        numeric_columns
-    ] = holding_display[
-        numeric_columns
-    ].round(2)
-
-
-    st.dataframe(
-        holding_display,
-        hide_index=True,
-        use_container_width=True,
-    )
-
-
-    st.caption(
-        "Holding statistics use today's positions "
-        "and today's portfolio weights."
-    )
