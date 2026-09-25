@@ -38,7 +38,7 @@ EURO = "\u20ac"
 # ============================================================
 
 st.set_page_config(
-    page_title="Portfolio Intelligence",
+    page_title="Portfolio Tracker",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="locked",
@@ -4052,7 +4052,7 @@ with st.sidebar:
     render_html(
         """
         <div class="sidebar-brand">
-            Portfolio Intelligence
+            Portfolio Tracker
         </div>
         """
     )
