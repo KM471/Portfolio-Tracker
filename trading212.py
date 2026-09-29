@@ -10,34 +10,36 @@ from dotenv import load_dotenv
 
 
 # ============================================================
-# Credentials
+# Credential loading
 # ============================================================
 
-# Local computer:
-# Loads credentials from the .env file.
-#
-# Streamlit Cloud:
-# Loads credentials from Streamlit Secrets.
-#
-# The actual credential values are never stored in the code.
-
+# Locally this loads the existing .env file.
+# On Streamlit Cloud, credentials are read from st.secrets.
 load_dotenv()
 
 
 def _get_setting(name):
-    # First try normal environment variables.
-    # Locally these are populated by load_dotenv().
+    """
+    Read a setting from the local environment first,
+    then from Streamlit Secrets.
+    """
+
     value = os.getenv(name)
 
-    if value:
-        return str(value).strip()
+    if value is not None:
+        value = str(value).strip()
 
-    # If not found, try Streamlit Cloud Secrets.
+        if value:
+            return value
+
     try:
         value = st.secrets[name]
 
-        if value:
-            return str(value).strip()
+        if value is not None:
+            value = str(value).strip()
+
+            if value:
+                return value
 
     except (KeyError, FileNotFoundError):
         pass
@@ -48,63 +50,99 @@ def _get_setting(name):
     return None
 
 
-API_KEY = _get_setting(
-    "TRADING212_API_KEY"
-)
+def _get_credentials():
+    """
+    Resolve credentials at request time instead of once
+    when this module is imported.
+    """
 
-API_SECRET = _get_setting(
-    "TRADING212_API_SECRET"
-)
+    api_key = _get_setting(
+        "TRADING212_API_KEY"
+    )
 
-BASE_URL = _get_setting(
-    "TRADING212_BASE_URL"
-)
+    api_secret = _get_setting(
+        "TRADING212_API_SECRET"
+    )
 
+    base_url = _get_setting(
+        "TRADING212_BASE_URL"
+    )
 
-def _check_credentials():
     missing = []
 
-    if not API_KEY:
+    if not api_key:
         missing.append(
             "TRADING212_API_KEY"
         )
 
-    if not API_SECRET:
+    if not api_secret:
         missing.append(
             "TRADING212_API_SECRET"
         )
 
-    if not BASE_URL:
+    if not base_url:
         missing.append(
             "TRADING212_BASE_URL"
         )
 
     if missing:
+        secret_status = {}
+
         try:
-            available_secret_names = list(
-                st.secrets.keys()
-            )
-        except Exception:
-            available_secret_names = []
+            for name in (
+                "TRADING212_API_KEY",
+                "TRADING212_API_SECRET",
+                "TRADING212_BASE_URL",
+            ):
+                if name in st.secrets:
+                    raw_value = st.secrets[name]
+
+                    secret_status[name] = (
+                        f"present, "
+                        f"length={len(str(raw_value))}"
+                    )
+                else:
+                    secret_status[name] = (
+                        "not present"
+                    )
+
+        except Exception as error:
+            secret_status = {
+                "diagnostic_error":
+                type(error).__name__
+            }
 
         raise RuntimeError(
             "Trading 212 credentials are missing. "
             f"Missing: {', '.join(missing)}. "
-            "Streamlit secret names currently visible to the app: "
-            f"{available_secret_names}"
+            f"Secret status: {secret_status}"
         )
+
+    return (
+        api_key,
+        api_secret,
+        base_url.rstrip("/"),
+    )
 
 
 # ============================================================
 # HTTP helpers
 # ============================================================
 
-def _request_url(url, params=None):
-    _check_credentials()
+def _request_url(
+    url,
+    params=None,
+):
+    api_key, api_secret, _ = (
+        _get_credentials()
+    )
 
     response = requests.get(
         url,
-        auth=(API_KEY, API_SECRET),
+        auth=(
+            api_key,
+            api_secret,
+        ),
         params=params,
         timeout=30,
     )
@@ -119,7 +157,10 @@ def _request_url(url, params=None):
 
         response = requests.get(
             url,
-            auth=(API_KEY, API_SECRET),
+            auth=(
+                api_key,
+                api_secret,
+            ),
             params=params,
             timeout=30,
         )
@@ -129,17 +170,32 @@ def _request_url(url, params=None):
     return response.json()
 
 
-def _get(endpoint, params=None):
+def _get(
+    endpoint,
+    params=None,
+):
+    _, _, base_url = (
+        _get_credentials()
+    )
+
     return _request_url(
-        f"{BASE_URL}{endpoint}",
+        f"{base_url}{endpoint}",
         params=params,
     )
 
 
-def _get_all_pages(endpoint):
+def _get_all_pages(
+    endpoint,
+):
+    _, _, base_url = (
+        _get_credentials()
+    )
+
     data = _get(
         endpoint,
-        params={"limit": 50},
+        params={
+            "limit": 50
+        },
     )
 
     all_items = data.get(
@@ -153,7 +209,7 @@ def _get_all_pages(endpoint):
 
     while next_page:
         next_url = urljoin(
-            BASE_URL + "/",
+            base_url + "/",
             next_page,
         )
 
@@ -363,47 +419,68 @@ def get_positions():
 
         cleaned_positions.append(
             {
-                "ticker": internal_ticker,
-                "display_ticker": (
-                    display_ticker
-                ),
-                "company": company,
-                "isin": instrument.get(
-                    "isin"
-                ),
-                "instrument_currency": (
-                    instrument_currency
-                ),
-                "instrument_type": (
+                "ticker":
+                    internal_ticker,
+
+                "display_ticker":
+                    display_ticker,
+
+                "company":
+                    company,
+
+                "isin":
+                    instrument.get(
+                        "isin"
+                    ),
+
+                "instrument_currency":
+                    instrument_currency,
+
+                "instrument_type":
                     instrument_metadata.get(
                         "type"
-                    )
-                ),
-                "quantity": position[
-                    "quantity"
-                ],
-                "average_price": position[
-                    "averagePricePaid"
-                ],
-                "current_price": position[
-                    "currentPrice"
-                ],
-                "total_cost": wallet[
-                    "totalCost"
-                ],
-                "current_value": wallet[
-                    "currentValue"
-                ],
-                "unrealised_pnl": wallet[
-                    "unrealizedProfitLoss"
-                ],
-                "fx_impact": wallet.get(
-                    "fxImpact",
-                    0,
-                ),
-                "account_currency": wallet[
-                    "currency"
-                ],
+                    ),
+
+                "quantity":
+                    position[
+                        "quantity"
+                    ],
+
+                "average_price":
+                    position[
+                        "averagePricePaid"
+                    ],
+
+                "current_price":
+                    position[
+                        "currentPrice"
+                    ],
+
+                "total_cost":
+                    wallet[
+                        "totalCost"
+                    ],
+
+                "current_value":
+                    wallet[
+                        "currentValue"
+                    ],
+
+                "unrealised_pnl":
+                    wallet[
+                        "unrealizedProfitLoss"
+                    ],
+
+                "fx_impact":
+                    wallet.get(
+                        "fxImpact",
+                        0,
+                    ),
+
+                "account_currency":
+                    wallet[
+                        "currency"
+                    ],
             }
         )
 
@@ -433,8 +510,10 @@ def get_all_transactions():
 # ============================================================
 
 def get_all_dividends():
-    dividends = _get_all_pages(
-        "/equity/history/dividends"
+    dividends = (
+        _get_all_pages(
+            "/equity/history/dividends"
+        )
     )
 
     return pd.DataFrame(
@@ -475,80 +554,113 @@ def get_all_orders():
         )
 
         wallet_currency = (
-            wallet.get("currency")
+            wallet.get(
+                "currency"
+            )
         )
 
         (
             tax_total,
             unconverted_tax_count,
         ) = _normalise_taxes(
-            wallet.get("taxes"),
+            wallet.get(
+                "taxes"
+            ),
             wallet_currency,
         )
 
         cleaned_orders.append(
             {
-                "order_id": order.get(
-                    "id"
-                ),
-                "ticker": order.get(
-                    "ticker"
-                ),
-                "side": order.get(
-                    "side"
-                ),
-                "order_type": order.get(
-                    "type"
-                ),
-                "status": order.get(
-                    "status"
-                ),
-                "created_at": order.get(
-                    "createdAt"
-                ),
-                "filled_at": fill.get(
-                    "filledAt"
-                ),
-                "quantity": fill.get(
-                    "quantity"
-                ),
-                "price": fill.get(
-                    "price"
-                ),
-                "currency": order.get(
-                    "currency"
-                ),
-                "order_value": order.get(
-                    "value"
-                ),
-                "filled_value": order.get(
-                    "filledValue"
-                ),
-                "instrument_name": (
+                "order_id":
+                    order.get(
+                        "id"
+                    ),
+
+                "ticker":
+                    order.get(
+                        "ticker"
+                    ),
+
+                "side":
+                    order.get(
+                        "side"
+                    ),
+
+                "order_type":
+                    order.get(
+                        "type"
+                    ),
+
+                "status":
+                    order.get(
+                        "status"
+                    ),
+
+                "created_at":
+                    order.get(
+                        "createdAt"
+                    ),
+
+                "filled_at":
+                    fill.get(
+                        "filledAt"
+                    ),
+
+                "quantity":
+                    fill.get(
+                        "quantity"
+                    ),
+
+                "price":
+                    fill.get(
+                        "price"
+                    ),
+
+                "currency":
+                    order.get(
+                        "currency"
+                    ),
+
+                "order_value":
+                    order.get(
+                        "value"
+                    ),
+
+                "filled_value":
+                    order.get(
+                        "filledValue"
+                    ),
+
+                "instrument_name":
                     instrument.get(
                         "name"
-                    )
-                ),
-                "net_value": wallet.get(
-                    "netValue",
-                    0,
-                ),
-                "realised_pnl": (
+                    ),
+
+                "net_value":
+                    wallet.get(
+                        "netValue",
+                        0,
+                    ),
+
+                "realised_pnl":
                     wallet.get(
                         "realisedProfitLoss",
                         0,
-                    )
-                ),
-                "taxes": tax_total,
-                "unconverted_tax_count": (
-                    unconverted_tax_count
-                ),
-                "fx_rate": wallet.get(
-                    "fxRate"
-                ),
-                "wallet_currency": (
-                    wallet_currency
-                ),
+                    ),
+
+                "taxes":
+                    tax_total,
+
+                "unconverted_tax_count":
+                    unconverted_tax_count,
+
+                "fx_rate":
+                    wallet.get(
+                        "fxRate"
+                    ),
+
+                "wallet_currency":
+                    wallet_currency,
             }
         )
 
