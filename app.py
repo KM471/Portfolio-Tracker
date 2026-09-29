@@ -1,9 +1,56 @@
 ﻿import html
 import math
+import os
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+
+# ============================================================
+# Streamlit Cloud secrets -> environment variables
+# ============================================================
+#
+# Local use:
+#   trading212.py loads the existing .env file as before.
+#
+# Streamlit Cloud:
+#   The deployed app has no .env file. Streamlit stores the
+#   credentials in st.secrets, so copy those values into the
+#   process environment BEFORE importing trading212.py.
+#
+# This lets the rest of the project keep using the same
+# os.getenv(...) credential logic in both environments.
+
+def _load_streamlit_secrets_into_environment():
+    secret_names = (
+        "TRADING212_API_KEY",
+        "TRADING212_API_SECRET",
+        "TRADING212_BASE_URL",
+    )
+
+    try:
+        for name in secret_names:
+            value = st.secrets.get(name)
+
+            if value is not None:
+                value = str(value).strip()
+
+                if value:
+                    os.environ[name] = value
+
+    except (FileNotFoundError, KeyError):
+        # Normal when running locally with only a .env file.
+        pass
+
+    except Exception:
+        # Do not stop local startup if Streamlit secrets are
+        # unavailable for any reason.
+        pass
+
+
+_load_streamlit_secrets_into_environment()
+
 
 from trading212 import get_account_summary
 from performance_metrics import get_performance_metrics
