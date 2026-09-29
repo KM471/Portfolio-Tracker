@@ -5,24 +5,82 @@ from urllib.parse import urljoin
 
 import pandas as pd
 import requests
+import streamlit as st
 from dotenv import load_dotenv
 
 
+# ============================================================
+# Credentials
+# ============================================================
+
+# Local development:
+#   Reads credentials from .env
+#
+# Streamlit Cloud:
+#   Reads credentials from Streamlit Secrets
+#
+# .env remains excluded from Git and is never uploaded.
+
 load_dotenv()
 
-API_KEY = os.getenv("TRADING212_API_KEY")
-API_SECRET = os.getenv("TRADING212_API_SECRET")
-BASE_URL = os.getenv("TRADING212_BASE_URL")
+
+def _get_setting(name, default=None):
+    """
+    Get a configuration value.
+
+    Priority:
+    1. Environment variable / local .env
+    2. Streamlit Secrets
+    3. Supplied default
+    """
+
+    value = os.getenv(name)
+
+    if value is not None and str(value).strip():
+        return str(value).strip()
+
+    try:
+        if name in st.secrets:
+            value = st.secrets[name]
+
+            if value is not None and str(value).strip():
+                return str(value).strip()
+
+    except Exception:
+        # This is normal when running locally without
+        # .streamlit/secrets.toml.
+        pass
+
+    return default
+
+
+API_KEY = _get_setting("TRADING212_API_KEY")
+API_SECRET = _get_setting("TRADING212_API_SECRET")
+
+BASE_URL = _get_setting(
+    "TRADING212_BASE_URL",
+    "https://live.trading212.com/api/v0",
+).rstrip("/")
 
 
 def _check_credentials():
-    if not API_KEY or not API_SECRET or not BASE_URL:
-        raise RuntimeError(
-            "Trading 212 credentials are missing. Check your .env file."
+    if not API_KEY or not API_SECRET:
+        raise ValueError(
+            "Trading 212 credentials are missing. "
+            "Add TRADING212_API_KEY and TRADING212_API_SECRET "
+            "to your local .env file or Streamlit Secrets."
         )
 
 
+# ============================================================
+# HTTP helpers
+# ============================================================
+
 def _request_url(url, params=None):
+    """
+    Send an authenticated GET request to Trading 212.
+    """
+
     _check_credentials()
 
     response = requests.get(
@@ -32,8 +90,8 @@ def _request_url(url, params=None):
         timeout=30,
     )
 
+    # Simple retry for Trading 212 rate limiting.
     if response.status_code == 429:
-        print("Trading 212 rate limit reached. Waiting 12 seconds...")
         time.sleep(12)
 
         response = requests.get(
@@ -49,123 +107,185 @@ def _request_url(url, params=None):
 
 
 def _get(endpoint, params=None):
+    """
+    Request an endpoint relative to the Trading 212 base URL.
+    """
+
+    url = f"{BASE_URL}{endpoint}"
+
     return _request_url(
-        f"{BASE_URL}{endpoint}",
+        url,
         params=params,
     )
 
 
 def _get_all_pages(endpoint):
-    data = _get(
+    """
+    Retrieve every page from a paginated Trading 212 endpoint.
+    """
+
+    payload = _get(
         endpoint,
         params={"limit": 50},
     )
 
-    all_items = data.get("items", [])
-    next_page = data.get("nextPagePath")
+    # Some Trading 212 endpoints may return a plain list.
+    if isinstance(payload, list):
+        return payload
+
+    items = list(
+        payload.get("items", [])
+    )
+
+    next_page = payload.get(
+        "nextPagePath"
+    )
+
+    seen_pages = set()
 
     while next_page:
+
+        # Prevent an accidental infinite pagination loop.
+        if next_page in seen_pages:
+            break
+
+        seen_pages.add(next_page)
+
         next_url = urljoin(
             BASE_URL + "/",
             next_page,
         )
 
-        data = _request_url(next_url)
-
-        all_items.extend(
-            data.get("items", [])
+        payload = _request_url(
+            next_url
         )
 
-        next_page = data.get("nextPagePath")
+        if isinstance(payload, list):
+            items.extend(payload)
+            break
 
-    return all_items
+        items.extend(
+            payload.get("items", [])
+        )
+
+        next_page = payload.get(
+            "nextPagePath"
+        )
+
+    return items
 
 
-def _normalise_taxes(taxes, wallet_currency):
-    if taxes is None:
-        return 0.0, 0
-
-    if isinstance(taxes, (int, float)):
-        return float(taxes), 0
-
-    if not isinstance(taxes, list):
-        return 0.0, 0
-
-    total = 0.0
-    unconverted_count = 0
-
-    for tax in taxes:
-        if not isinstance(tax, dict):
-            continue
-
-        quantity = tax.get("quantity")
-        tax_currency = tax.get("currency")
-
-        if quantity is None:
-            continue
-
-        try:
-            quantity = float(quantity)
-        except (TypeError, ValueError):
-            continue
-
-        if (
-            not tax_currency
-            or not wallet_currency
-            or tax_currency == wallet_currency
-        ):
-            total += quantity
-        else:
-            unconverted_count += 1
-
-    return total, unconverted_count
-
+# ============================================================
+# Account
+# ============================================================
 
 def get_account_summary():
-    return _get("/equity/account/summary")
+    """
+    Return the live Trading 212 account summary.
+    """
 
+    return _get(
+        "/equity/account/summary"
+    )
+
+
+# ============================================================
+# Instrument metadata
+# ============================================================
 
 @lru_cache(maxsize=1)
 def get_instrument_metadata():
-    instruments = _get(
-        "/equity/metadata/instruments"
-    )
+    """
+    Return Trading 212 instrument metadata indexed by
+    internal Trading 212 ticker.
+    """
 
-    return {
-        instrument["ticker"]: instrument
-        for instrument in instruments
-        if instrument.get("ticker")
-    }
+    try:
+        data = _get(
+            "/equity/metadata/instruments"
+        )
+
+    except Exception:
+        # Metadata improves display names but is not required
+        # for the rest of the portfolio calculations.
+        return {}
+
+    if isinstance(data, dict):
+        instruments = data.get(
+            "items",
+            [],
+        )
+    else:
+        instruments = data
+
+    metadata = {}
+
+    for instrument in instruments:
+
+        ticker = instrument.get(
+            "ticker"
+        )
+
+        if ticker:
+            metadata[ticker] = instrument
+
+    return metadata
 
 
 def _fallback_ticker(ticker):
+    """
+    Convert Trading 212 internal ticker names into a cleaner
+    fallback display value when metadata is unavailable.
+    """
+
+    if not ticker:
+        return ""
+
     if ticker.endswith("_US_EQ"):
-        return ticker.removesuffix("_US_EQ")
+        return ticker[:-6]
 
     if ticker.endswith("_EQ"):
-        return ticker.removesuffix("_EQ")
+        return ticker[:-3]
 
     return ticker
 
 
+# ============================================================
+# Current positions
+# ============================================================
+
 def get_positions():
-    positions = _get("/equity/positions")
+    """
+    Return current open positions as a cleaned DataFrame.
+    """
 
-    try:
-        metadata = get_instrument_metadata()
-    except requests.RequestException:
-        metadata = {}
+    positions = _get(
+        "/equity/positions"
+    )
 
-    cleaned_positions = []
+    metadata = get_instrument_metadata()
+
+    rows = []
 
     for position in positions:
-        instrument = position["instrument"]
-        wallet = position["walletImpact"]
 
-        internal_ticker = instrument["ticker"]
+        instrument = position.get(
+            "instrument",
+            {},
+        )
+
+        internal_ticker = instrument.get(
+            "ticker",
+            "",
+        )
 
         instrument_metadata = metadata.get(
             internal_ticker,
+            {},
+        )
+
+        wallet_impact = position.get(
+            "walletImpact",
             {},
         )
 
@@ -185,90 +305,341 @@ def get_positions():
             or instrument.get("currency")
         )
 
-        cleaned_positions.append(
+        rows.append(
             {
                 "ticker": internal_ticker,
                 "display_ticker": display_ticker,
                 "company": company,
-                "isin": instrument.get("isin"),
+                "isin": (
+                    instrument_metadata.get("isin")
+                    or instrument.get("isin")
+                ),
                 "instrument_currency": instrument_currency,
-                "instrument_type": instrument_metadata.get("type"),
-                "quantity": position["quantity"],
-                "average_price": position["averagePricePaid"],
-                "current_price": position["currentPrice"],
-                "total_cost": wallet["totalCost"],
-                "current_value": wallet["currentValue"],
-                "unrealised_pnl": wallet["unrealizedProfitLoss"],
-                "fx_impact": wallet.get("fxImpact", 0),
-                "account_currency": wallet["currency"],
+                "instrument_type": instrument_metadata.get(
+                    "type"
+                ),
+                "quantity": position.get(
+                    "quantity"
+                ),
+                "average_price": position.get(
+                    "averagePricePaid"
+                ),
+                "current_price": position.get(
+                    "currentPrice"
+                ),
+                "total_cost": wallet_impact.get(
+                    "totalCost"
+                ),
+                "current_value": wallet_impact.get(
+                    "currentValue"
+                ),
+                "unrealised_pnl": wallet_impact.get(
+                    "unrealizedProfitLoss"
+                ),
+                "fx_impact": wallet_impact.get(
+                    "fxImpact"
+                ),
+                "account_currency": wallet_impact.get(
+                    "currency"
+                ),
             }
         )
 
-    return pd.DataFrame(cleaned_positions)
+    columns = [
+        "ticker",
+        "display_ticker",
+        "company",
+        "isin",
+        "instrument_currency",
+        "instrument_type",
+        "quantity",
+        "average_price",
+        "current_price",
+        "total_cost",
+        "current_value",
+        "unrealised_pnl",
+        "fx_impact",
+        "account_currency",
+    ]
 
+    return pd.DataFrame(
+        rows,
+        columns=columns,
+    )
+
+
+# ============================================================
+# Transactions
+# ============================================================
 
 def get_all_transactions():
-    transactions = _get_all_pages(
+    """
+    Return complete Trading 212 transaction history.
+    """
+
+    items = _get_all_pages(
         "/equity/history/transactions"
     )
 
-    return pd.DataFrame(transactions)
+    return pd.DataFrame(items)
 
+
+# ============================================================
+# Dividends
+# ============================================================
 
 def get_all_dividends():
-    dividends = _get_all_pages(
+    """
+    Return complete Trading 212 dividend history.
+    """
+
+    items = _get_all_pages(
         "/equity/history/dividends"
     )
 
-    return pd.DataFrame(dividends)
+    return pd.DataFrame(items)
+
+
+# ============================================================
+# Historical orders
+# ============================================================
+
+def _safe_float(value):
+    """
+    Convert a value to float when possible.
+    """
+
+    if value is None:
+        return None
+
+    try:
+        return float(value)
+
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalise_taxes(
+    taxes,
+    wallet_currency=None,
+):
+    """
+    Convert Trading 212 tax information into a numeric amount
+    where possible.
+
+    Returns:
+        tax_total,
+        unconverted_tax_count
+    """
+
+    if taxes is None:
+        return 0.0, 0
+
+    if isinstance(
+        taxes,
+        (int, float),
+    ):
+        return float(taxes), 0
+
+    if isinstance(taxes, dict):
+        taxes = [taxes]
+
+    total = 0.0
+    unconverted_count = 0
+
+    for tax in taxes:
+
+        if not isinstance(tax, dict):
+            value = _safe_float(tax)
+
+            if value is None:
+                unconverted_count += 1
+            else:
+                total += value
+
+            continue
+
+        quantity = _safe_float(
+            tax.get("quantity")
+        )
+
+        tax_currency = tax.get(
+            "currency"
+        )
+
+        if quantity is None:
+            unconverted_count += 1
+            continue
+
+        # If the tax is already in the wallet currency,
+        # it can be included directly.
+        if (
+            not tax_currency
+            or not wallet_currency
+            or tax_currency == wallet_currency
+        ):
+            total += quantity
+        else:
+            # Keep track of taxes which would require
+            # an FX conversion instead of silently
+            # treating them as the wallet currency.
+            unconverted_count += 1
+
+    return total, unconverted_count
 
 
 def get_all_orders():
+    """
+    Return complete historical order history as a cleaned
+    DataFrame used by the portfolio reconstruction code.
+    """
+
     items = _get_all_pages(
         "/equity/history/orders"
     )
 
-    cleaned_orders = []
+    rows = []
 
     for item in items:
-        order = item.get("order") or {}
-        fill = item.get("fill") or {}
 
-        instrument = order.get("instrument") or {}
-        wallet = fill.get("walletImpact") or {}
+        order = item.get(
+            "order",
+            {},
+        ) or {}
 
-        wallet_currency = wallet.get("currency")
+        fill = item.get(
+            "fill",
+            {},
+        ) or {}
 
-        tax_total, unconverted_tax_count = _normalise_taxes(
-            wallet.get("taxes"),
-            wallet_currency,
+        instrument = order.get(
+            "instrument",
+            {},
+        ) or {}
+
+        wallet_impact = fill.get(
+            "walletImpact",
+            {},
+        ) or {}
+
+        wallet_currency = wallet_impact.get(
+            "currency"
         )
 
-        cleaned_orders.append(
+        taxes, unconverted_tax_count = (
+            _normalise_taxes(
+                wallet_impact.get("taxes"),
+                wallet_currency,
+            )
+        )
+
+        order_quantity = _safe_float(
+            order.get("quantity")
+        )
+
+        filled_quantity = _safe_float(
+            fill.get("quantity")
+        )
+
+        if filled_quantity is None:
+            filled_quantity = _safe_float(
+                order.get("filledQuantity")
+            )
+
+        if filled_quantity is None:
+            filled_quantity = order_quantity
+
+        price = _safe_float(
+            fill.get("price")
+        )
+
+        order_value = None
+        filled_value = None
+
+        if (
+            order_quantity is not None
+            and price is not None
+        ):
+            order_value = abs(
+                order_quantity * price
+            )
+
+        if (
+            filled_quantity is not None
+            and price is not None
+        ):
+            filled_value = abs(
+                filled_quantity * price
+            )
+
+        rows.append(
             {
                 "order_id": order.get("id"),
-                "ticker": order.get("ticker"),
+                "ticker": (
+                    order.get("ticker")
+                    or instrument.get("ticker")
+                ),
                 "side": order.get("side"),
                 "order_type": order.get("type"),
                 "status": order.get("status"),
-                "created_at": order.get("createdAt"),
-                "filled_at": fill.get("filledAt"),
-                "quantity": fill.get("quantity"),
-                "price": fill.get("price"),
-                "currency": order.get("currency"),
-                "order_value": order.get("value"),
-                "filled_value": order.get("filledValue"),
-                "instrument_name": instrument.get("name"),
-                "net_value": wallet.get("netValue", 0),
-                "realised_pnl": wallet.get(
-                    "realisedProfitLoss",
-                    0,
+                "created_at": order.get(
+                    "createdAt"
                 ),
-                "taxes": tax_total,
-                "unconverted_tax_count": unconverted_tax_count,
-                "fx_rate": wallet.get("fxRate"),
-                "wallet_currency": wallet_currency,
+                "filled_at": fill.get(
+                    "filledAt"
+                ),
+                "quantity": filled_quantity,
+                "price": price,
+                "currency": instrument.get(
+                    "currency"
+                ),
+                "order_value": order_value,
+                "filled_value": filled_value,
+                "instrument_name": instrument.get(
+                    "name"
+                ),
+                "net_value": wallet_impact.get(
+                    "netValue"
+                ),
+                "realised_pnl": wallet_impact.get(
+                    "realisedProfitLoss"
+                ),
+                "taxes": taxes,
+                "unconverted_tax_count": (
+                    unconverted_tax_count
+                ),
+                "fx_rate": wallet_impact.get(
+                    "fxRate"
+                ),
+                "wallet_currency": (
+                    wallet_currency
+                ),
             }
         )
 
-    return pd.DataFrame(cleaned_orders)
+    columns = [
+        "order_id",
+        "ticker",
+        "side",
+        "order_type",
+        "status",
+        "created_at",
+        "filled_at",
+        "quantity",
+        "price",
+        "currency",
+        "order_value",
+        "filled_value",
+        "instrument_name",
+        "net_value",
+        "realised_pnl",
+        "taxes",
+        "unconverted_tax_count",
+        "fx_rate",
+        "wallet_currency",
+    ]
+
+    return pd.DataFrame(
+        rows,
+        columns=columns,
+    )
