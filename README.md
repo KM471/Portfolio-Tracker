@@ -3,7 +3,7 @@
 A Python + Streamlit dashboard that connects to the Trading 212 API and answers a question a headline return alone cannot: *is this actually a good return, or does it just look like one?*
 
 It reconstructs portfolio history day by day, separates investment performance from the timing of my own deposits and withdrawals, benchmarks against a cash-flow-matched S&P 500, and breaks risk down to the individual holding.
-
+**[Live Dashboard](https://kian-portfolio-dashboard.streamlit.app)**
 ![Portfolio Tracker overview](assets/dashboard-overview.png)
 
 Built by **Kian Magrone**, final-year **TU905 Economics & Finance** student at **TU Dublin** — with AI assistance (see [How I Used AI](#how-i-used-ai)).
