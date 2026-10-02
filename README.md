@@ -3,7 +3,9 @@
 A Python + Streamlit dashboard that connects to the Trading 212 API and answers a question a headline return alone cannot: *is this actually a good return, or does it just look like one?*
 
 It reconstructs portfolio history day by day, separates investment performance from the timing of my own deposits and withdrawals, benchmarks against a cash-flow-matched S&P 500, and breaks risk down to the individual holding.
+
 **[Live Dashboard](https://kian-portfolio-dashboard.streamlit.app)**
+
 ![Portfolio Tracker overview](assets/dashboard-overview.png)
 
 Built by **Kian Magrone**, final-year **TU905 Economics & Finance** student at **TU Dublin** — with AI assistance (see [How I Used AI](#how-i-used-ai)).
@@ -37,6 +39,8 @@ That's why the dashboard reports **time-weighted return (TWR)** and **money-weig
 **Capital** — net invested capital and portfolio profit tracked separately through time, so cash movements never get mistaken for performance.
 
 **Holdings** — allocation, per-holding return, beta and risk contribution, plus a hypothetical backtest of today's weights over past periods.
+
+**AI-assisted ticker resolution** — if a Trading 212 instrument does not have a known Yahoo Finance mapping, the app searches Yahoo Finance for candidate instruments, uses an OpenAI model to select the most likely equivalent, independently verifies the selected symbol against Yahoo market data and currency, and caches the verified mapping for future use.
 
 ---
 
@@ -142,10 +146,32 @@ This is why a position can be a small % of the portfolio by value but a large % 
 
 </details>
 
+<details>
+<summary><strong>AI-assisted ticker resolution</strong> — how unknown Trading 212 symbols are mapped safely</summary>
+
+Trading 212 instrument codes do not always correspond directly to Yahoo Finance symbols.
+
+The resolver uses the following order:
+
+1. use an existing manually verified mapping when one is available;
+2. use a previously verified automatic mapping from the local mapping cache;
+3. for an unseen instrument, search Yahoo Finance using the Trading 212 instrument name, short name, ISIN and ticker hint;
+4. give the real Yahoo Finance candidates and Trading 212 metadata to an OpenAI model, which is restricted to selecting only from those candidates;
+5. independently verify that the selected Yahoo symbol returns price history and that its currency is consistent with the Trading 212 instrument;
+6. cache the verified mapping for future use.
+
+If the model cannot select a suitable candidate, or the selected symbol fails verification, the resolver raises an error rather than silently using an unverified ticker.
+
+</details>
+
 **Data flow:**
 
 ```
-Trading 212 account data + Yahoo Finance prices/FX
+Trading 212 account data
+        +
+known / AI-assisted symbol resolution
+        +
+Yahoo Finance prices / FX
         ↓
 Historical portfolio reconstruction
         ↓
@@ -164,9 +190,11 @@ Streamlit / Plotly dashboard
 | **pandas / NumPy** | Data processing, time series, numerical calculations |
 | **Streamlit** | Dashboard application |
 | **Plotly** | Interactive charts |
-| **yfinance** | Historical market and FX data |
+| **yfinance** | Historical market data, FX data and instrument search |
+| **OpenAI API** | AI-assisted resolution of ambiguous Trading 212 → Yahoo Finance instrument mappings |
 | **requests** | Trading 212 API calls |
 | **python-dotenv** | Local API credential loading |
+| **Git / GitHub** | Version control and deployment workflow |
 
 Exact versions are pinned in `requirements.txt`.
 
@@ -178,8 +206,9 @@ Exact versions are pinned in `requirements.txt`.
 | `dashboard_charts.py` | Plotly charts and visualisations |
 | `trading212.py` | Trading 212 API auth and requests |
 | `account_history.py` | Retrieves and prepares historical account activity |
-| `market_data.py` | Historical market-price retrieval |
-| `market_symbols.py` | Maps Trading 212 instruments to market-data symbols |
+| `market_data.py` | Historical market-price retrieval and symbol-resolution integration |
+| `market_symbols.py` | Manually verified Trading 212 → Yahoo Finance mappings |
+| `ticker_resolver.py` | Searches, resolves, verifies and caches previously unseen Trading 212 → Yahoo Finance mappings |
 | `fx_data.py` | Historical FX data and EUR conversion |
 | `history_cache.py` | Local caching for historical data |
 | `portfolio_history.py` | Reconstructs holdings and portfolio value through time |
@@ -197,7 +226,13 @@ Exact versions are pinned in `requirements.txt`.
 
 ## API and data handling
 
-Trading 212 is accessed via authenticated HTTP requests, with credentials kept in a local `.env` file excluded from Git. The dashboard is read-only — it never sends trading instructions. Requests use timeouts and surface HTTP errors rather than swallowing them, and historical data is cached so normal use doesn't repeatedly hit the same endpoints. Yahoo Finance is used separately for market prices and FX.
+Trading 212 is accessed through authenticated HTTP requests. The dashboard is read-only — it never sends trading instructions. Yahoo Finance is used separately for historical prices, FX data and candidate instrument search.
+
+Known Trading 212 → Yahoo Finance mappings are handled deterministically. When an unseen instrument is encountered, the AI-assisted resolver searches Yahoo Finance first and passes only real candidate instruments to the OpenAI model. The selected symbol is then checked independently against Yahoo price history and currency metadata before it is accepted.
+
+Automatically resolved mappings are cached so the OpenAI API is not normally called again for the same instrument while that cache persists.
+
+For local development, credentials are loaded from a `.env` file that is excluded from Git. The deployed Streamlit application uses Streamlit Secrets instead. API keys are never stored in the repository.
 
 ## Quick start
 
@@ -209,9 +244,11 @@ pip install -r requirements.txt
 
 Create a `.env` file in the project root:
 
-```
+```env
 TRADING212_API_KEY=your_key_here
 TRADING212_API_SECRET=your_secret_here
+TRADING212_BASE_URL=https://live.trading212.com/api/v0
+OPENAI_API_KEY=your_key_here
 ```
 
 Then run:
@@ -220,20 +257,23 @@ Then run:
 streamlit run app.py
 ```
 
-Built around my own Trading 212 account — using it with a different account may need extra symbol mappings for instruments Yahoo Finance names differently.
+The project is primarily built and validated around my own Trading 212 account. AI-assisted ticker resolution removes the need to manually add every unfamiliar Yahoo Finance symbol, but the wider historical cache and reconstruction logic are still designed around single-account use.
 
 ---
 
 ## How I used AI
 
-I worked through this step by step with ChatGPT rather than handing it the whole spec at once, because I wanted to understand what was being built and be able to challenge the output when it didn't make sense. That meant:
+I worked through this project step by step with ChatGPT rather than handing it the whole specification at once, because I wanted to understand what was being built and be able to challenge the output when it didn't make sense.
 
-- deciding what each metric should measure and why — including why TWR and MWR needed to be shown separately, not blended into one number
-- checking calculations against figures I could verify by hand from my own account
-- catching and fixing issues introduced during development, including incorrect period boundaries and chart/date inconsistencies
-- using Claude separately to work through a cleaner dashboard design, then feeding that back to ChatGPT to implement
+That meant:
 
-AI made the build much faster. The part that actually taught me something was learning to specify a calculation precisely, check the result, and recognise when the answer was wrong.
+- deciding what each metric should measure and why — including why TWR and MWR needed to be shown separately, not blended into one number;
+- checking calculations against figures I could verify by hand from my own account;
+- catching and fixing issues introduced during development, including incorrect period boundaries and chart/date inconsistencies;
+- using Claude separately to work through a cleaner dashboard design, then feeding that back to ChatGPT to implement;
+- designing and testing an AI-assisted ticker resolver where the model is constrained to real Yahoo Finance candidates and its selection is independently validated before use.
+
+AI made the build much faster. The part that actually taught me something was learning to specify a calculation or system precisely, inspect the result and challenge it when the output did not make sense.
 
 ## What I learned
 
@@ -243,19 +283,22 @@ AI made the build much faster. The part that actually taught me something was le
 - Why TWR and MWR answer different questions — and why the gap between them can be large
 - How much benchmark methodology can change the conclusion of a comparison
 - How covariance, beta, volatility and drawdown fit together in portfolio risk
+- Integrating an LLM API as a constrained fallback rather than blindly trusting generated output
+- Combining external search results, model selection, programmatic validation and caching in one data pipeline
 - Directing AI productively while still validating its output myself
 
 ## Known limitations
 
-- **Instrument mapping:** Trading 212 codes don't always map cleanly to Yahoo Finance tickers; I maintain aliases for the ones that need it.
+- **Ticker resolution:** known mappings are deterministic, while unseen instruments can fall back to AI-assisted Yahoo Finance resolution. Unusual listings, share classes or incomplete external metadata can still create edge cases even though candidate symbols are verified before use.
+- **AI mapping cache:** automatically resolved ticker mappings are cached locally. On ephemeral cloud infrastructure such as Streamlit Community Cloud, the cache may be lost when the application environment is recreated, causing an instrument to be resolved again.
 - **Full liquidation and re-entry:** reconstruction works well for my history, but fully selling out and later rebuilding a portfolio creates edge cases that need more testing before this generalises to other accounts.
-- **Local cache:** designed around single-account use — clear it before pointing the app at a different Trading 212 account.
+- **Historical account cache:** designed around single-account use — it should be cleared before pointing the app at a different Trading 212 account.
 - **Broker vs. reconstructed values:** small differences can appear versus Trading 212's own live prices and FX/valuation timing.
-- **Current-holdings backtest** deliberately holds today's weights constant through a past period — it's a hypothetical comparison, not what I actually owned at the time.
+- **Current-holdings backtest:** deliberately holds today's weights constant through a past period — it's a hypothetical comparison, not what I actually owned at the time.
 
 ## Roadmap
 
-- [ ] AI-assisted ticker mapping — an agent that detects a failed instrument mapping, finds the likely Yahoo Finance symbol, tests it, and proposes the fix
+- [x] AI-assisted ticker mapping — search Yahoo Finance candidates, select the likely equivalent with an OpenAI model, verify the result and cache the mapping
 - [ ] Portfolio assistant / chatbot that answers questions about the data directly (*"how has my beta changed over the last 3 months?"*)
 - [ ] Sector and geographic exposure breakdowns
 - [ ] Automated weekly/monthly performance and risk reports
