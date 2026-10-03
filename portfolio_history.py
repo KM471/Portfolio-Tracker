@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 from history_cache import get_cached_orders
@@ -5,17 +6,33 @@ from market_data import get_all_price_history
 from fx_data import get_all_fx_history
 
 
+QUANTITY_ZERO_TOLERANCE = 1e-8
+
+
 # ============================================================
 # ORDER DATA
 # ============================================================
 
-def _prepare_orders():
-    orders = get_cached_orders().copy()
+def _prepare_orders(force_refresh=False):
+    orders = (
+        get_cached_orders(
+            force_refresh=force_refresh,
+        )
+        .copy()
+    )
+
+    if orders.empty:
+        return orders
 
     orders = orders[
         (orders["status"] == "FILLED")
-        & (orders["side"].isin(["BUY", "SELL"]))
+        & orders["side"].isin(
+            ["BUY", "SELL"]
+        )
     ].copy()
+
+    if orders.empty:
+        return orders
 
     orders["filled_at"] = pd.to_datetime(
         orders["filled_at"],
@@ -32,28 +49,17 @@ def _prepare_orders():
     orders["quantity"] = pd.to_numeric(
         orders["quantity"],
         errors="coerce",
-    )
-
-    orders["filled_value"] = pd.to_numeric(
-        orders["filled_value"],
-        errors="coerce",
-    )
+    ).abs()
 
     orders["net_value"] = pd.to_numeric(
         orders["net_value"],
         errors="coerce",
     )
 
+    # walletImpact.netValue is the actual account-currency
+    # wallet movement caused by the trade.
     orders["trade_value_eur"] = (
-        orders["filled_value"]
-        .fillna(
-            orders["net_value"]
-        )
-        .abs()
-    )
-
-    orders["quantity"] = (
-        orders["quantity"]
+        orders["net_value"]
         .abs()
     )
 
@@ -76,17 +82,21 @@ def _prepare_orders():
     if missing_trade_values > 0:
         raise ValueError(
             f"{missing_trade_values} trades have no usable "
-            f"filled_value or net_value."
+            "walletImpact.netValue."
         )
 
-    orders = orders.sort_values(
-        [
-            "trade_date",
-            "filled_at",
-        ]
-    ).reset_index(drop=True)
-
-    return orders
+    return (
+        orders
+        .sort_values(
+            [
+                "trade_date",
+                "filled_at",
+            ]
+        )
+        .reset_index(
+            drop=True
+        )
+    )
 
 
 # ============================================================
@@ -98,11 +108,14 @@ def _prepare_price_data(
     start_date,
     force_refresh=False,
 ):
-    prices = get_all_price_history(
-        tickers,
-        start_date=start_date,
-        force_refresh=force_refresh,
-    ).copy()
+    prices = (
+        get_all_price_history(
+            tickers,
+            start_date=start_date,
+            force_refresh=force_refresh,
+        )
+        .copy()
+    )
 
     prices["date"] = pd.to_datetime(
         prices["date"],
@@ -114,6 +127,30 @@ def _prepare_price_data(
         errors="coerce",
     )
 
+    # Yahoo supplies stock-split events alongside its historical
+    # prices. The price history itself is already represented on
+    # the split-adjusted share basis, so historical Trading 212
+    # order quantities must be converted to that same basis.
+    if (
+        "stock_splits"
+        not in prices.columns
+    ):
+        prices[
+            "stock_splits"
+        ] = 0.0
+
+    prices[
+        "stock_splits"
+    ] = (
+        pd.to_numeric(
+            prices[
+                "stock_splits"
+            ],
+            errors="coerce",
+        )
+        .fillna(0.0)
+    )
+
     prices = prices.dropna(
         subset=[
             "date",
@@ -122,22 +159,253 @@ def _prepare_price_data(
         ]
     )
 
-    prices = prices.sort_values(
+    return (
+        prices
+        .sort_values(
+            [
+                "trading212_ticker",
+                "date",
+            ]
+        )
+        .drop_duplicates(
+            subset=[
+                "trading212_ticker",
+                "date",
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+# ============================================================
+# STOCK-SPLIT ADJUSTMENT
+# ============================================================
+
+def _build_split_events(
+    prices,
+):
+    """
+    Return known Yahoo split events for each Trading 212 ticker.
+
+    Yahoo's historical price series is represented on today's
+    split-adjusted share basis.
+
+    Trading 212 historical orders, however, contain the quantity
+    that actually existed at the time of each trade.
+
+    Therefore an order before a later split must have its
+    historical quantity multiplied by that future split ratio
+    before it can be combined with Yahoo's adjusted price series.
+    """
+
+    if (
+        prices.empty
+        or "stock_splits"
+        not in prices.columns
+    ):
+        return {}
+
+    split_rows = prices[
+        (
+            prices[
+                "stock_splits"
+            ].notna()
+        )
+        & (
+            prices[
+                "stock_splits"
+            ] > 0
+        )
+        & (
+            ~np.isclose(
+                prices[
+                    "stock_splits"
+                ],
+                1.0,
+            )
+        )
+    ][
         [
             "trading212_ticker",
             "date",
+            "stock_splits",
+        ]
+    ].copy()
+
+    if split_rows.empty:
+        return {}
+
+    split_events = {}
+
+    for (
+        ticker,
+        group,
+    ) in split_rows.groupby(
+        "trading212_ticker"
+    ):
+        events = []
+
+        for _, row in (
+            group
+            .sort_values("date")
+            .iterrows()
+        ):
+            split_ratio = float(
+                row[
+                    "stock_splits"
+                ]
+            )
+
+            if (
+                not np.isfinite(
+                    split_ratio
+                )
+                or split_ratio <= 0
+            ):
+                continue
+
+            events.append(
+                (
+                    pd.Timestamp(
+                        row["date"]
+                    ).normalize(),
+                    split_ratio,
+                )
+            )
+
+        if events:
+            split_events[
+                ticker
+            ] = events
+
+    return split_events
+
+
+def _split_adjustment_factor(
+    ticker,
+    trade_date,
+    split_events,
+):
+    """
+    Convert a historical order quantity onto the share basis used
+    by Yahoo's current split-adjusted historical price series.
+
+    Only splits AFTER the trade are applied.
+
+    Example:
+        buy 1 share
+        later 10-for-1 split
+        Yahoo historical price is divided by 10
+        adjusted historical quantity becomes 10 shares
+    """
+
+    events = split_events.get(
+        ticker,
+        [],
+    )
+
+    if not events:
+        return 1.0
+
+    trade_date = (
+        pd.Timestamp(
+            trade_date
+        )
+        .normalize()
+    )
+
+    factor = 1.0
+
+    for (
+        split_date,
+        split_ratio,
+    ) in events:
+
+        if split_date > trade_date:
+            factor *= float(
+                split_ratio
+            )
+
+    return factor
+
+
+def _adjust_orders_for_splits(
+    orders,
+    prices,
+):
+    """
+    Add split-adjusted quantities while retaining the original
+    Trading 212 quantities for diagnostics.
+
+    We do NOT alter trade_value_eur. Cash movement always comes
+    directly from Trading 212 walletImpact.netValue.
+    """
+
+    if orders.empty:
+        return orders.copy()
+
+    adjusted = (
+        orders.copy()
+    )
+
+    adjusted[
+        "raw_quantity"
+    ] = adjusted[
+        "quantity"
+    ]
+
+    split_events = (
+        _build_split_events(
+            prices
+        )
+    )
+
+    adjustment_factors = []
+
+    for _, order in (
+        adjusted.iterrows()
+    ):
+        factor = (
+            _split_adjustment_factor(
+                ticker=(
+                    order[
+                        "ticker"
+                    ]
+                ),
+                trade_date=(
+                    order[
+                        "trade_date"
+                    ]
+                ),
+                split_events=(
+                    split_events
+                ),
+            )
+        )
+
+        adjustment_factors.append(
+            factor
+        )
+
+    adjusted[
+        "split_adjustment_factor"
+    ] = adjustment_factors
+
+    adjusted[
+        "quantity"
+    ] = (
+        adjusted[
+            "raw_quantity"
+        ]
+        * adjusted[
+            "split_adjustment_factor"
         ]
     )
 
-    prices = prices.drop_duplicates(
-        subset=[
-            "trading212_ticker",
-            "date",
-        ],
-        keep="last",
-    )
-
-    return prices
+    return adjusted
 
 
 # ============================================================
@@ -149,20 +417,27 @@ def _prepare_fx_data(
     start_date,
     force_refresh=False,
 ):
-    fx = get_all_fx_history(
-        currencies,
-        start_date=start_date,
-        force_refresh=force_refresh,
-    ).copy()
+    fx = (
+        get_all_fx_history(
+            currencies,
+            start_date=start_date,
+            force_refresh=force_refresh,
+        )
+        .copy()
+    )
 
     fx["date"] = pd.to_datetime(
         fx["date"],
         errors="coerce",
     ).dt.normalize()
 
-    fx["rate_to_eur"] = pd.to_numeric(
-        fx["rate_to_eur"],
-        errors="coerce",
+    fx["rate_to_eur"] = (
+        pd.to_numeric(
+            fx[
+                "rate_to_eur"
+            ],
+            errors="coerce",
+        )
     )
 
     fx = fx.dropna(
@@ -173,22 +448,25 @@ def _prepare_fx_data(
         ]
     )
 
-    fx = fx.sort_values(
-        [
-            "currency",
-            "date",
-        ]
+    return (
+        fx
+        .sort_values(
+            [
+                "currency",
+                "date",
+            ]
+        )
+        .drop_duplicates(
+            subset=[
+                "currency",
+                "date",
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
     )
-
-    fx = fx.drop_duplicates(
-        subset=[
-            "currency",
-            "date",
-        ],
-        keep="last",
-    )
-
-    return fx
 
 
 # ============================================================
@@ -198,16 +476,18 @@ def _prepare_fx_data(
 def get_portfolio_history(
     force_refresh=False,
 ):
-    orders = _prepare_orders()
+    raw_orders = _prepare_orders(
+        force_refresh=force_refresh,
+    )
 
-    if orders.empty:
+    if raw_orders.empty:
         return (
             pd.DataFrame(),
             pd.DataFrame(),
         )
 
     tickers = sorted(
-        orders[
+        raw_orders[
             "ticker"
         ]
         .dropna()
@@ -216,7 +496,7 @@ def get_portfolio_history(
     )
 
     first_trade_date = (
-        orders[
+        raw_orders[
             "trade_date"
         ]
         .min()
@@ -225,13 +505,30 @@ def get_portfolio_history(
 
     start_date_text = (
         first_trade_date
-        .strftime("%Y-%m-%d")
+        .strftime(
+            "%Y-%m-%d"
+        )
     )
 
     prices = _prepare_price_data(
         tickers,
         start_date_text,
         force_refresh=force_refresh,
+    )
+
+    if prices.empty:
+        raise ValueError(
+            "No historical market prices were available "
+            "for the traded instruments."
+        )
+
+    # Convert historical Trading 212 quantities to the same
+    # split-adjusted share basis as Yahoo's historical prices.
+    orders = (
+        _adjust_orders_for_splits(
+            raw_orders,
+            prices,
+        )
     )
 
     currency_map = (
@@ -243,12 +540,14 @@ def get_portfolio_history(
         ]
         .drop_duplicates(
             subset=[
-                "trading212_ticker",
+                "trading212_ticker"
             ]
         )
         .set_index(
             "trading212_ticker"
-        )["currency"]
+        )[
+            "currency"
+        ]
         .to_dict()
     )
 
@@ -279,7 +578,8 @@ def get_portfolio_history(
     )
 
     price_table = (
-        prices.pivot(
+        prices
+        .pivot(
             index="date",
             columns="trading212_ticker",
             values="close",
@@ -291,7 +591,8 @@ def get_portfolio_history(
     )
 
     fx_table = (
-        fx.pivot(
+        fx
+        .pivot(
             index="date",
             columns="currency",
             values="rate_to_eur",
@@ -305,8 +606,10 @@ def get_portfolio_history(
 
     orders_by_date = {
         date: group
-        for date, group
-        in orders.groupby(
+        for (
+            date,
+            group,
+        ) in orders.groupby(
             "trade_date"
         )
     }
@@ -317,7 +620,6 @@ def get_portfolio_history(
     }
 
     daily_records = []
-
     holding_records = []
 
     for date in calendar:
@@ -337,7 +639,6 @@ def get_portfolio_history(
             for _, order in (
                 day_orders.iterrows()
             ):
-
                 ticker = (
                     order[
                         "ticker"
@@ -384,13 +685,14 @@ def get_portfolio_history(
 
                 trade_count += 1
 
+        # Remove harmless floating-point residue.
         for ticker in tickers:
 
             if abs(
                 quantities[
                     ticker
                 ]
-            ) < 1e-8:
+            ) < QUANTITY_ZERO_TOLERANCE:
 
                 quantities[
                     ticker
@@ -479,68 +781,78 @@ def get_portfolio_history(
 
             holding_records.append(
                 {
-                    "date": date,
-                    "ticker": ticker,
-                    "quantity": quantity,
-                    "price": price,
-                    "currency": currency,
-                    "fx_rate_to_eur": (
-                        fx_rate
-                    ),
-                    "value_eur": (
-                        value_eur
-                    ),
+                    "date":
+                        date,
+
+                    "ticker":
+                        ticker,
+
+                    "quantity":
+                        quantity,
+
+                    "price":
+                        price,
+
+                    "currency":
+                        currency,
+
+                    "fx_rate_to_eur":
+                        fx_rate,
+
+                    "value_eur":
+                        value_eur,
                 }
             )
 
-        net_trade_flow_eur = (
-            gross_buys_eur
-            - gross_sells_eur
+        # A partial portfolio valuation is worse than explicitly
+        # reporting that the valuation is unavailable. Otherwise
+        # a missing instrument can manufacture a fake return.
+        valuation_complete = (
+            missing_positions == 0
         )
+
+        if not valuation_complete:
+            invested_value_eur = np.nan
 
         daily_records.append(
             {
-                "date": date,
+                "date":
+                    date,
 
-                "invested_value_eur": (
-                    invested_value_eur
-                ),
+                "invested_value_eur":
+                    invested_value_eur,
 
-                "open_positions": (
-                    open_positions
-                ),
+                "valuation_complete":
+                    valuation_complete,
 
-                "missing_positions": (
-                    missing_positions
-                ),
+                "open_positions":
+                    open_positions,
 
-                "trade_count": (
-                    trade_count
-                ),
+                "missing_positions":
+                    missing_positions,
 
-                "gross_buys_eur": (
-                    gross_buys_eur
-                ),
+                "trade_count":
+                    trade_count,
 
-                "gross_sells_eur": (
-                    gross_sells_eur
-                ),
+                "gross_buys_eur":
+                    gross_buys_eur,
 
-                "net_trade_flow_eur": (
-                    net_trade_flow_eur
-                ),
+                "gross_sells_eur":
+                    gross_sells_eur,
+
+                "net_trade_flow_eur":
+                    (
+                        gross_buys_eur
+                        - gross_sells_eur
+                    ),
             }
         )
 
-    portfolio_history = pd.DataFrame(
-        daily_records
-    )
-
-    holdings_history = pd.DataFrame(
-        holding_records
-    )
-
     return (
-        portfolio_history,
-        holdings_history,
+        pd.DataFrame(
+            daily_records
+        ),
+        pd.DataFrame(
+            holding_records
+        ),
     )

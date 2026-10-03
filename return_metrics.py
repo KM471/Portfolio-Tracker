@@ -1,4 +1,5 @@
 import math
+
 import numpy as np
 import pandas as pd
 
@@ -185,8 +186,6 @@ def _calculate_xirr(
     ):
         return np.nan, 0
 
-    # Scan across a wide set of possible annualised rates.
-    # This is more robust than assuming one narrow bracket.
     candidate_rates = np.concatenate(
         [
             np.linspace(
@@ -263,9 +262,6 @@ def _calculate_xirr(
     if not roots:
         return np.nan, 0
 
-    # Normally there will be exactly one economically
-    # meaningful root. If multiple exist, prefer the one
-    # closest to zero and report the root count separately.
     selected = min(
         roots,
         key=lambda x: abs(x),
@@ -274,6 +270,73 @@ def _calculate_xirr(
     return (
         float(selected),
         len(roots),
+    )
+
+
+def _safe_cagr(
+    growth_factor,
+    elapsed_years,
+):
+    """
+    Convert a cumulative growth factor into a real-valued CAGR.
+
+    A CAGR is only mathematically meaningful here when the growth
+    factor is positive and finite.
+
+    Returning NaN prevents negative growth-index edge cases from
+    producing complex numbers and crashing the dashboard.
+    """
+
+    try:
+        growth_factor = float(
+            growth_factor
+        )
+
+        elapsed_years = float(
+            elapsed_years
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return np.nan
+
+    if (
+        not np.isfinite(
+            growth_factor
+        )
+        or not np.isfinite(
+            elapsed_years
+        )
+        or elapsed_years <= 0
+        or growth_factor <= 0
+    ):
+        return np.nan
+
+    try:
+        result = (
+            growth_factor
+            ** (
+                1.0
+                / elapsed_years
+            )
+            - 1.0
+        )
+
+    except (
+        OverflowError,
+        ValueError,
+    ):
+        return np.nan
+
+    if not np.isfinite(
+        result
+    ):
+        return np.nan
+
+    return float(
+        result
     )
 
 
@@ -335,22 +398,21 @@ def get_return_metrics(
     )
 
     portfolio_cagr = (
-        portfolio_growth
-        ** (
-            1 / elapsed_years
+        _safe_cagr(
+            portfolio_growth,
+            elapsed_years,
         )
-        - 1
     )
 
     benchmark_cagr = (
-        benchmark_growth
-        ** (
-            1 / elapsed_years
+        _safe_cagr(
+            benchmark_growth,
+            elapsed_years,
         )
-        - 1
     )
 
     # Actual portfolio MWR / XIRR.
+    #
     # external_flow_eur is account-perspective:
     #
     # deposit  = positive
@@ -391,9 +453,6 @@ def get_return_metrics(
     )
 
     # Synthetic S&P 500 MWR.
-    #
-    # benchmark_flow_eur represents money entering/leaving
-    # the synthetic benchmark, so signs are inverted here too.
     benchmark_flows = history[
         [
             "date",
@@ -449,15 +508,27 @@ def get_return_metrics(
             ),
 
         "portfolio_cagr_pct":
-            float(
-                portfolio_cagr
-                * 100
+            (
+                float(
+                    portfolio_cagr
+                    * 100
+                )
+                if np.isfinite(
+                    portfolio_cagr
+                )
+                else np.nan
             ),
 
         "benchmark_cagr_pct":
-            float(
-                benchmark_cagr
-                * 100
+            (
+                float(
+                    benchmark_cagr
+                    * 100
+                )
+                if np.isfinite(
+                    benchmark_cagr
+                )
+                else np.nan
             ),
 
         "money_weighted_return_pct":

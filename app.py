@@ -1451,18 +1451,29 @@ def calculate_period_mwr(
     history,
     first_date,
     last_date,
+    value_column="portfolio_value_eur",
+    flow_column="external_flow_eur",
 ):
     """
-    Money-weighted return using the exact same start and end
-    boundary as the displayed period.
+    Money-weighted return over one displayed period.
 
-    If there are no external flows, MWR is simply the account's
-    holding-period return and therefore should be very close to TWR.
+    The same function is used for both the real portfolio and the
+    cash-flow-matched benchmark so comparisons remain like-for-like.
+
+    first_date is the baseline date used by the displayed period.
+    Deposits are positive account cash flows; withdrawals are negative.
+    Investor-perspective XIRR therefore uses the opposite sign.
     """
 
     data = clean_period_history(
         history
     )
+
+    if (
+        value_column
+        not in data.columns
+    ):
+        return math.nan
 
     first_date = pd.Timestamp(
         first_date
@@ -1481,7 +1492,7 @@ def calculate_period_mwr(
         &
         (
             data[
-                "portfolio_value_eur"
+                value_column
             ].notna()
         )
     ]
@@ -1501,7 +1512,7 @@ def calculate_period_mwr(
 
     start_value = float(
         baseline[
-            "portfolio_value_eur"
+            value_column
         ]
     )
 
@@ -1514,7 +1525,7 @@ def calculate_period_mwr(
         &
         (
             data[
-                "portfolio_value_eur"
+                value_column
             ].notna()
         )
     ]
@@ -1532,7 +1543,7 @@ def calculate_period_mwr(
 
     end_value = float(
         ending[
-            "portfolio_value_eur"
+            value_column
         ]
     )
 
@@ -1556,16 +1567,13 @@ def calculate_period_mwr(
         )
     ].copy()
 
-    if (
-        "external_flow_eur"
-        in period_rows.columns
-    ):
+    if flow_column in period_rows.columns:
 
         period_rows[
-            "external_flow_eur"
+            flow_column
         ] = pd.to_numeric(
             period_rows[
-                "external_flow_eur"
+                flow_column
             ],
             errors="coerce",
         ).fillna(
@@ -1575,22 +1583,17 @@ def calculate_period_mwr(
     else:
 
         period_rows[
-            "external_flow_eur"
+            flow_column
         ] = 0.0
 
     absolute_external_flow = float(
         period_rows[
-            "external_flow_eur"
+            flow_column
         ].abs().sum()
     )
 
-    # --------------------------------------------------------
-    # No money entered or left the account.
-    #
-    # In this case money weighting has nothing to weight.
-    # The correct result is the actual start-to-end account return.
-    # --------------------------------------------------------
-
+    # With no external flows, there is nothing for money
+    # weighting to weight. The holding-period return is exact.
     if absolute_external_flow < 0.005:
 
         return (
@@ -1601,10 +1604,6 @@ def calculate_period_mwr(
             )
             - 1
         ) * 100
-
-    # --------------------------------------------------------
-    # External flows occurred: use XIRR.
-    # --------------------------------------------------------
 
     cash_flows = [
         (
@@ -1618,7 +1617,10 @@ def calculate_period_mwr(
     for row in period_rows.itertuples():
 
         flow = float(
-            row.external_flow_eur
+            getattr(
+                row,
+                flow_column,
+            )
         )
 
         if abs(
@@ -1626,9 +1628,6 @@ def calculate_period_mwr(
         ) < 1e-9:
             continue
 
-        # Investor perspective:
-        # Deposit into account = negative cash flow.
-        # Withdrawal from account = positive cash flow.
         cash_flows.append(
             (
                 row.date,
@@ -1703,7 +1702,6 @@ def calculate_period_mwr(
         dietz_flows,
     )
 
-
 def full_period_mwr_from_xirr(
     annual_xirr_pct,
     first_date,
@@ -1760,7 +1758,9 @@ def full_period_mwr_from_xirr(
 def build_period_mwr_map(
     history,
     period_table,
-    returns,
+    full_annual_xirr_pct,
+    value_column,
+    flow_column,
 ):
     output = {}
 
@@ -1793,6 +1793,12 @@ def build_period_mwr_map(
             row[
                 "last_date"
             ],
+            value_column=(
+                value_column
+            ),
+            flow_column=(
+                flow_column
+            ),
         )
 
     full_row = get_period_row(
@@ -1811,13 +1817,147 @@ def build_period_mwr_map(
         output[
             "FULL"
         ] = full_period_mwr_from_xirr(
-            returns[
-                "money_weighted_return_pct"
-            ],
+            full_annual_xirr_pct,
             full_row[
                 "first_date"
             ],
             full_row[
+                "last_date"
+            ],
+        )
+
+    return output
+
+
+def annualise_cumulative_mwr(
+    cumulative_return_pct,
+    first_date,
+    last_date,
+):
+    """
+    Convert a cumulative money-weighted return over an exact
+    displayed window into its annualised equivalent.
+
+    For periods where calculate_period_mwr came from XIRR this
+    reverses the de-annualisation step and recovers the period
+    XIRR. With no external cash flows it is the annualised
+    start-to-end return, which is mathematically the same XIRR
+    for the opening and closing values.
+    """
+
+    if pd.isna(
+        cumulative_return_pct
+    ):
+        return math.nan
+
+    cumulative_rate = (
+        float(
+            cumulative_return_pct
+        )
+        / 100.0
+    )
+
+    if cumulative_rate <= -1:
+        return math.nan
+
+    start = pd.Timestamp(
+        first_date
+    )
+
+    end = pd.Timestamp(
+        last_date
+    )
+
+    days = max(
+        (
+            end
+            - start
+        ).days,
+        1,
+    )
+
+    try:
+
+        annualised = (
+            (
+                1.0
+                + cumulative_rate
+            )
+            ** (
+                365.0
+                / days
+            )
+            - 1.0
+        ) * 100.0
+
+    except (
+        OverflowError,
+        ValueError,
+    ):
+        return math.nan
+
+    if not math.isfinite(
+        annualised
+    ):
+        return math.nan
+
+    return float(
+        annualised
+    )
+
+
+def build_period_xirr_map(
+    period_table,
+    cumulative_mwr_map,
+    full_annual_xirr_pct,
+):
+    """
+    Annualised money-weighted return for FULL / 1Y / 3M / 1M.
+
+    FULL uses the backend XIRR directly. Shorter periods are
+    annualised from their exact cumulative MWR windows.
+    """
+
+    output = {
+        "FULL": (
+            float(
+                full_annual_xirr_pct
+            )
+            if not pd.isna(
+                full_annual_xirr_pct
+            )
+            else math.nan
+        )
+    }
+
+    for period in [
+        "1M",
+        "3M",
+        "1Y",
+    ]:
+
+        row = get_period_row(
+            period_table,
+            period,
+        )
+
+        if row is None:
+            output[
+                period
+            ] = math.nan
+            continue
+
+        output[
+            period
+        ] = annualise_cumulative_mwr(
+            cumulative_mwr_map.get(
+                period,
+                math.nan,
+            ),
+            row[
+                "first_date"
+            ],
+            row[
                 "last_date"
             ],
         )
@@ -1863,11 +2003,35 @@ def load_dashboard_data():
         holdings_table,
     ) = get_holdings_comparison()
 
-    period_mwr_map = (
+    portfolio_mwr_map = (
         build_period_mwr_map(
             history,
             period_table,
-            returns,
+            returns[
+                "money_weighted_return_pct"
+            ],
+            value_column=(
+                "portfolio_value_eur"
+            ),
+            flow_column=(
+                "external_flow_eur"
+            ),
+        )
+    )
+
+    benchmark_mwr_map = (
+        build_period_mwr_map(
+            history,
+            period_table,
+            returns[
+                "benchmark_mwr_pct"
+            ],
+            value_column=(
+                "benchmark_value_eur"
+            ),
+            flow_column=(
+                "benchmark_flow_eur"
+            ),
         )
     )
 
@@ -1880,7 +2044,8 @@ def load_dashboard_data():
         raw_period_table,
         current_holdings_table,
         holdings_table,
-        period_mwr_map,
+        portfolio_mwr_map,
+        benchmark_mwr_map,
     )
 
 
@@ -1918,10 +2083,32 @@ if (
     raw_period_table,
     current_holdings_table,
     holdings_table,
-    period_mwr_map,
+    portfolio_mwr_map,
+    benchmark_mwr_map,
 ) = st.session_state[
     "dashboard_data"
 ]
+
+
+portfolio_xirr_map = (
+    build_period_xirr_map(
+        period_table,
+        portfolio_mwr_map,
+        returns[
+            "money_weighted_return_pct"
+        ],
+    )
+)
+
+benchmark_xirr_map = (
+    build_period_xirr_map(
+        period_table,
+        benchmark_mwr_map,
+        returns[
+            "benchmark_mwr_pct"
+        ],
+    )
+)
 
 
 # ============================================================
@@ -2055,7 +2242,7 @@ def render_overview():
 
             if st.button(
                 "Refresh",
-                use_container_width=True,
+                width="stretch",
             ):
 
                 load_dashboard_data.clear()
@@ -2108,10 +2295,13 @@ def render_overview():
         vertical_alignment="center",
     )
 
-    total_profit = float(
-        performance[
-            "simple_gain_eur"
-        ]
+    total_profit = (
+        float(live_total)
+        - float(
+            performance[
+                "net_capital_invested_eur"
+            ]
+        )
     )
 
     with top_columns[0]:
@@ -2129,13 +2319,6 @@ def render_overview():
                 </div>
 
                 <div class="hero-profit">
-
-                    <span class="{colour_class(total_profit)}">
-                        {format_signed_eur(total_profit)}
-                    </span>
-                    total profit
-
-                    <br>
 
                     <span class="pi-muted">
                         Net invested
@@ -2171,24 +2354,30 @@ def render_overview():
         ]
     )
 
-    period_mwr = (
-        period_mwr_map.get(
+    portfolio_mwr = (
+        portfolio_mwr_map.get(
             period,
             math.nan,
         )
     )
 
-    benchmark_twr = float(
-        selected[
-            "benchmark_twr_pct"
-        ]
+    benchmark_mwr = (
+        benchmark_mwr_map.get(
+            period,
+            math.nan,
+        )
     )
 
-    relative = float(
-        selected[
-            "relative_return_pp"
-        ]
-    )
+    if (
+        pd.isna(portfolio_mwr)
+        or pd.isna(benchmark_mwr)
+    ):
+        mwr_gap = math.nan
+    else:
+        mwr_gap = (
+            float(portfolio_mwr)
+            - float(benchmark_mwr)
+        )
 
     period_profit = float(
         selected[
@@ -2214,108 +2403,207 @@ def render_overview():
         ]
     )
 
-    with top_columns[1]:
+    if period == "FULL":
 
-        card(
-            "Portfolio TWR",
-            format_signed_pct(
-                portfolio_twr
-            ),
-            "Cash flows neutralised",
-            value_tone=(
-                portfolio_twr
-            ),
+        annualised_mwr = float(
+            returns[
+                "money_weighted_return_pct"
+            ]
         )
 
-    with top_columns[2]:
+        annualised_benchmark = float(
+            returns[
+                "benchmark_mwr_pct"
+            ]
+        )
 
-        if period == "FULL":
-
-            mwr_subtext = (
-                "Cumulative money-weighted return"
-            )
-
-        elif abs(
-            external_flow
-        ) < 0.005:
-
-            mwr_subtext = (
-                "No external flows in period"
-            )
-
+        if (
+            pd.isna(annualised_mwr)
+            or pd.isna(annualised_benchmark)
+        ):
+            annualised_gap = math.nan
         else:
-
-            mwr_subtext = (
-                "Cash-flow timing adjusted"
+            annualised_gap = (
+                annualised_mwr
+                - annualised_benchmark
             )
 
-        card(
-            "Money-weighted return",
-            format_signed_pct(
-                period_mwr
-            ),
-            mwr_subtext,
-            value_tone=(
-                None
-                if pd.isna(
-                    period_mwr
+        with top_columns[1]:
+
+            card(
+                "Total profit",
+                format_signed_eur(
+                    total_profit
+                ),
+                "Live account value − net invested",
+                value_tone=total_profit,
+            )
+
+        with top_columns[2]:
+
+            card(
+                "Annualised return",
+                format_signed_pct(
+                    annualised_mwr
+                ),
+                "Money-weighted return (XIRR)",
+                value_tone=annualised_mwr,
+            )
+
+        with top_columns[3]:
+
+            card(
+                "S&P 500 equivalent",
+                format_signed_pct(
+                    annualised_benchmark
+                ),
+                "Same cash flows · annualised",
+                value_tone=annualised_benchmark,
+            )
+
+        with top_columns[4]:
+
+            card(
+                "Outperformance",
+                format_signed_pp(
+                    annualised_gap
+                ),
+                "XIRR difference · per year",
+                value_tone=(
+                    None
+                    if pd.isna(annualised_gap)
+                    else annualised_gap
+                ),
+            )
+
+        with top_columns[5]:
+
+            card(
+                "Portfolio TWR",
+                format_signed_pct(
+                    portfolio_twr
+                ),
+                (
+                    '<span class="pi-positive">'
+                    "Cumulative MWR "
+                    f"{format_signed_pct(portfolio_mwr)}"
+                    "</span>"
+                ),
+                value_tone=portfolio_twr,
+            )
+
+    else:
+
+        period_xirr = (
+            portfolio_xirr_map.get(
+                period,
+                math.nan,
+            )
+        )
+
+        benchmark_period_xirr = (
+            benchmark_xirr_map.get(
+                period,
+                math.nan,
+            )
+        )
+
+        if (
+            pd.isna(period_xirr)
+            or pd.isna(
+                benchmark_period_xirr
+            )
+        ):
+            period_xirr_gap = math.nan
+        else:
+            period_xirr_gap = (
+                float(period_xirr)
+                - float(
+                    benchmark_period_xirr
                 )
-                else period_mwr
-            ),
-        )
-
-    with top_columns[3]:
-
-        card(
-            "S&P 500 return",
-            format_signed_pct(
-                benchmark_twr
-            ),
-            "Mirrored cash flows",
-            value_tone=(
-                benchmark_twr
-            ),
-        )
-
-    with top_columns[4]:
-
-        card(
-            "Performance gap",
-            format_signed_pp(
-                relative
-            ),
-            "Portfolio TWR vs S&P",
-            value_tone=(
-                relative
-            ),
-        )
-
-    with top_columns[5]:
-
-        if period == "FULL":
-
-            date_text = (
-                "Full history"
             )
 
-        else:
+        with top_columns[1]:
 
-            date_text = (
-                f"{first_date.strftime('%d %b')}"
-                " → "
-                f"{last_date.strftime('%d %b')}"
+            card(
+                "Period profit",
+                format_signed_eur(
+                    period_profit
+                ),
+                (
+                    f"{first_date.strftime('%d %b')}"
+                    " → "
+                    f"{last_date.strftime('%d %b')}"
+                ),
+                value_tone=period_profit,
             )
 
-        card(
-            "Period P/L",
-            format_signed_eur(
-                period_profit
-            ),
-            date_text,
-            value_tone=(
-                period_profit
-            ),
-        )
+        with top_columns[2]:
+
+            mwr_subtext = (
+                "Annualised XIRR "
+                f"{format_signed_pct(period_xirr)}"
+            )
+
+            card(
+                "Money-weighted return",
+                format_signed_pct(
+                    portfolio_mwr
+                ),
+                mwr_subtext,
+                value_tone=(
+                    None
+                    if pd.isna(portfolio_mwr)
+                    else portfolio_mwr
+                ),
+            )
+
+        with top_columns[3]:
+
+            card(
+                "S&P 500 equivalent",
+                format_signed_pct(
+                    benchmark_mwr
+                ),
+                (
+                    "Annualised XIRR "
+                    f"{format_signed_pct(benchmark_period_xirr)}"
+                ),
+                value_tone=(
+                    None
+                    if pd.isna(benchmark_mwr)
+                    else benchmark_mwr
+                ),
+            )
+
+        with top_columns[4]:
+
+            card(
+                "Outperformance",
+                format_signed_pp(
+                    mwr_gap
+                ),
+                (
+                    "Annualised gap "
+                    f"{format_signed_pp(period_xirr_gap)} / year"
+                ),
+                value_tone=(
+                    None
+                    if pd.isna(mwr_gap)
+                    else mwr_gap
+                ),
+            )
+
+        with top_columns[5]:
+
+            card(
+                "Portfolio TWR",
+                format_signed_pct(
+                    portfolio_twr
+                ),
+                "Cash flows neutralised",
+                value_tone=portfolio_twr,
+            )
 
     # --------------------------------------------------------
     # Quick risk
@@ -2481,7 +2769,7 @@ def render_overview():
         render_html(
             """
             <div class="section-label">
-                Portfolio vs S&amp;P 500
+                Time-weighted performance vs S&amp;P 500
             </div>
             """
         )
@@ -2614,7 +2902,7 @@ def render_overview():
                     )
 
                     card(
-                        "Portfolio",
+                        "Portfolio TWR",
                         format_signed_pct(
                             value
                         ),
@@ -2631,7 +2919,7 @@ def render_overview():
                     )
 
                     card(
-                        "S&P 500",
+                        "S&P TWR",
                         format_signed_pct(
                             value
                         ),
@@ -2648,7 +2936,7 @@ def render_overview():
                     )
 
                     card(
-                        "Gap",
+                        "TWR gap",
                         format_signed_pp(
                             value
                         ),
@@ -2659,9 +2947,9 @@ def render_overview():
         else:
 
             st.caption(
-                "Drag or scroll to zoom. "
-                "Changing timeframe automatically "
-                "returns the chart to Zoom mode."
+                "Chart uses time-weighted returns (TWR). "
+                "Headline cards use money-weighted returns (MWR). "
+                "Drag or scroll to zoom."
             )
 
     with allocation_col:
@@ -2802,16 +3090,36 @@ def render_performance():
         if recent is None:
             continue
 
-        value = float(
-            recent[
-                "portfolio_twr_pct"
-            ]
+        value = (
+            portfolio_mwr_map.get(
+                period,
+                math.nan,
+            )
         )
 
-        relative = float(
-            recent[
-                "relative_return_pp"
-            ]
+        benchmark_value = (
+            benchmark_mwr_map.get(
+                period,
+                math.nan,
+            )
+        )
+
+        if (
+            pd.isna(value)
+            or pd.isna(benchmark_value)
+        ):
+            relative = math.nan
+        else:
+            relative = (
+                float(value)
+                - float(benchmark_value)
+            )
+
+        annualised_value = (
+            portfolio_xirr_map.get(
+                period,
+                math.nan,
+            )
         )
 
         with column:
@@ -2824,11 +3132,17 @@ def render_performance():
                     value
                 ),
                 (
+                    f"Annualised XIRR {format_signed_pct(annualised_value)}"
+                    " · "
                     f'<span class="{colour_class(relative)}">'
-                    f"{format_signed_pp(relative)} vs S&amp;P"
+                    f"{format_signed_pp(relative)} vs S&amp;P MWR"
                     "</span>"
                 ),
-                value_tone=value,
+                value_tone=(
+                    None
+                    if pd.isna(value)
+                    else value
+                ),
             )
 
     full = get_period_row(
@@ -2839,22 +3153,26 @@ def render_performance():
     with recent_columns[3]:
 
         value = float(
-            full[
-                "portfolio_cagr_pct"
+            returns[
+                "money_weighted_return_pct"
+            ]
+        )
+
+        benchmark_value = float(
+            returns[
+                "benchmark_mwr_pct"
             ]
         )
 
         card(
-            "Full-history CAGR",
+            "Annualised MWR (XIRR)",
             format_signed_pct(
                 value
             ),
             (
                 "S&amp;P "
                 f"{format_signed_pct(
-                    full[
-                        'benchmark_cagr_pct'
-                    ]
+                    benchmark_value
                 )}"
             ),
             value_tone=value,
@@ -2871,11 +3189,12 @@ def render_performance():
     period = st.radio(
         "Period",
         [
-            "FULL",
-            "1Y",
-            "3M",
             "1M",
+            "3M",
+            "1Y",
+            "FULL",
         ],
+        index=3,
         horizontal=True,
         format_func=period_label,
         key="performance_period",
@@ -2898,11 +3217,62 @@ def render_performance():
         risk_selected = selected
 
     selected_mwr = (
-        period_mwr_map.get(
+        portfolio_mwr_map.get(
             period,
             math.nan,
         )
     )
+
+    selected_benchmark_mwr = (
+        benchmark_mwr_map.get(
+            period,
+            math.nan,
+        )
+    )
+
+    if (
+        pd.isna(selected_mwr)
+        or pd.isna(
+            selected_benchmark_mwr
+        )
+    ):
+        selected_mwr_gap = math.nan
+    else:
+        selected_mwr_gap = (
+            float(selected_mwr)
+            - float(
+                selected_benchmark_mwr
+            )
+        )
+
+    selected_xirr = (
+        portfolio_xirr_map.get(
+            period,
+            math.nan,
+        )
+    )
+
+    selected_benchmark_xirr = (
+        benchmark_xirr_map.get(
+            period,
+            math.nan,
+        )
+    )
+
+    if (
+        pd.isna(selected_xirr)
+        or pd.isna(
+            selected_benchmark_xirr
+        )
+    ):
+        selected_xirr_gap = math.nan
+    else:
+        selected_xirr_gap = (
+            float(selected_xirr)
+            - float(
+                selected_benchmark_xirr
+            )
+        )
 
     first_date = pd.Timestamp(
         selected[
@@ -2950,48 +3320,12 @@ def render_performance():
         ]
     )
 
-    relative = float(
-        selected[
-            "relative_return_pp"
-        ]
-    )
-
     with return_cards[0]:
 
-        card(
-            "Portfolio TWR",
-            format_signed_pct(
-                portfolio_twr
-            ),
-            "Cash flows neutralised",
-            value_tone=portfolio_twr,
+        mwr_note = (
+            "Annualised XIRR "
+            f"{format_signed_pct(selected_xirr)}"
         )
-
-    with return_cards[1]:
-
-        if (
-            period != "FULL"
-            and
-            abs(
-                external_flow
-            ) < 0.005
-        ):
-
-            mwr_note = (
-                "No external flows in period"
-            )
-
-        elif period == "FULL":
-
-            mwr_note = (
-                "Cumulative money-weighted result"
-            )
-
-        else:
-
-            mwr_note = (
-                "Cash-flow timing included"
-            )
 
         card(
             "Money-weighted return",
@@ -3008,25 +3342,58 @@ def render_performance():
             ),
         )
 
+    with return_cards[1]:
+
+        card(
+            "S&P 500 equivalent",
+            format_signed_pct(
+                selected_benchmark_mwr
+            ),
+            (
+                "Annualised XIRR "
+                f"{format_signed_pct(selected_benchmark_xirr)}"
+            ),
+            value_tone=(
+                None
+                if pd.isna(
+                    selected_benchmark_mwr
+                )
+                else selected_benchmark_mwr
+            ),
+        )
+
     with return_cards[2]:
 
         card(
-            "S&P 500 TWR",
-            format_signed_pct(
-                benchmark_twr
+            "MWR outperformance",
+            format_signed_pp(
+                selected_mwr_gap
             ),
-            value_tone=benchmark_twr,
+            (
+                "Annualised gap "
+                f"{format_signed_pp(selected_xirr_gap)} / year"
+            ),
+            value_tone=(
+                None
+                if pd.isna(
+                    selected_mwr_gap
+                )
+                else selected_mwr_gap
+            ),
         )
 
     with return_cards[3]:
 
         card(
-            "Outperformance",
-            format_signed_pp(
-                relative
+            "Portfolio TWR",
+            format_signed_pct(
+                portfolio_twr
             ),
-            "Portfolio TWR vs S&P",
-            value_tone=relative,
+            (
+                "Cash flows neutralised · S&amp;P "
+                f"{format_signed_pct(benchmark_twr)}"
+            ),
+            value_tone=portfolio_twr,
         )
 
     # --------------------------------------------------------
@@ -3103,7 +3470,7 @@ def render_performance():
         ]
 
         card(
-            "CAGR",
+            "TWR CAGR",
             (
                 format_signed_pct(
                     cagr
@@ -3298,7 +3665,7 @@ def render_performance():
     # --------------------------------------------------------
 
     st.subheader(
-        "Portfolio vs S&P 500"
+        "Time-weighted performance vs S&P 500"
     )
 
     chart_start = (
@@ -3350,26 +3717,15 @@ def render_performance():
         with perspectives[0]:
 
             card(
-                "TWR",
-                format_signed_pct(
-                    portfolio_twr
-                ),
-                "Investment performance",
-                value_tone=portfolio_twr,
-            )
-
-        with perspectives[1]:
-
-            card(
-                "Period MWR",
+                "Cumulative MWR equivalent",
                 format_signed_pct(
                     selected_mwr
                 ),
-                "Cumulative money-weighted result",
+                "XIRR compounded across full history",
                 value_tone=selected_mwr,
             )
 
-        with perspectives[2]:
+        with perspectives[1]:
 
             card(
                 "XIRR",
@@ -3380,6 +3736,17 @@ def render_performance():
                 value_tone=annual_xirr,
             )
 
+        with perspectives[2]:
+
+            card(
+                "TWR",
+                format_signed_pct(
+                    portfolio_twr
+                ),
+                "Cash flows neutralised",
+                value_tone=portfolio_twr,
+            )
+
         with perspectives[3]:
 
             card(
@@ -3387,18 +3754,19 @@ def render_performance():
                 format_signed_pct(
                     simple_roi
                 ),
-                "Can be inflated after withdrawals",
+                "Net capital denominator",
                 value_tone=simple_roi,
             )
 
         render_html(
             """
             <div class="section-note">
-                TWR removes the effect of deposits and withdrawals.
-                Money-weighted return includes their timing.
-                XIRR expresses the full-history money-weighted result
-                as an annualised rate. Simple ROI is included as
-                context because withdrawals can shrink its denominator.
+                XIRR is the clearest annualised measure of the investor's actual
+                cash-flow experience because it reflects when capital entered
+                and left the account. The cumulative MWR equivalent compounds
+                that annual rate across the full history; it is not profit divided
+                by deposits. TWR remains a separate view of investment performance
+                with external cash flows neutralised. Simple ROI is context only.
             </div>
             """
         )
@@ -3443,23 +3811,41 @@ def render_performance():
                         comparison_period
                     ),
 
+                "Portfolio MWR %":
+                    portfolio_mwr_map.get(
+                        comparison_period,
+                        math.nan,
+                    ),
+
+                "S&P MWR %":
+                    benchmark_mwr_map.get(
+                        comparison_period,
+                        math.nan,
+                    ),
+
+                "MWR Gap pp":
+                    (
+                        portfolio_mwr_map.get(
+                            comparison_period,
+                            math.nan,
+                        )
+                        - benchmark_mwr_map.get(
+                            comparison_period,
+                            math.nan,
+                        )
+                    ),
+
                 "Portfolio TWR %":
                     row[
                         "portfolio_twr_pct"
                     ],
-
-                "MWR %":
-                    period_mwr_map.get(
-                        comparison_period,
-                        math.nan,
-                    ),
 
                 "S&P TWR %":
                     row[
                         "benchmark_twr_pct"
                     ],
 
-                "Gap pp":
+                "TWR Gap pp":
                     row[
                         "relative_return_pp"
                     ],
@@ -3513,7 +3899,7 @@ def render_performance():
     st.dataframe(
         comparison,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
 
 
@@ -3534,11 +3920,12 @@ def render_risk():
     period = st.radio(
         "Analysis period",
         [
-            "FULL",
-            "1Y",
-            "3M",
             "1M",
+            "3M",
+            "1Y",
+            "FULL",
         ],
+        index=3,
         horizontal=True,
         format_func=period_label,
         key="risk_period",
@@ -3732,27 +4119,125 @@ def render_risk():
         key="holding_risk_period",
     )
 
+    risk_view = st.radio(
+        "Holding risk view",
+        [
+            "Weight-adjusted",
+            "Actual contribution",
+        ],
+        horizontal=True,
+        key="holding_risk_view",
+    )
+
+    chart_holdings = holdings_table.copy()
+    suffix = contribution_period.lower()
+
+    if risk_view == "Weight-adjusted":
+
+        weight = pd.to_numeric(
+            chart_holdings[
+                "current_weight_pct"
+            ],
+            errors="coerce",
+        )
+
+        risk_contribution = pd.to_numeric(
+            chart_holdings[
+                f"risk_contribution_{suffix}_pct"
+            ],
+            errors="coerce",
+        )
+
+        beta = pd.to_numeric(
+            chart_holdings[
+                f"beta_{suffix}"
+            ],
+            errors="coerce",
+        )
+
+        valid_weight = weight > 1e-12
+
+        # 0% means the holding contributes risk exactly in
+        # proportion to its portfolio weight. +50% means it
+        # contributes 50% more risk than its capital weight
+        # would suggest; -50% means 50% less.
+        chart_holdings[
+            f"risk_contribution_{suffix}_pct"
+        ] = np.where(
+            valid_weight,
+            (
+                risk_contribution
+                / weight
+                - 1.0
+            )
+            * 100.0,
+            np.nan,
+        )
+
+        # Beta contribution is weight * beta. Dividing out the
+        # portfolio weight leaves the holding's beta itself.
+        # Subtracting 1 centres the chart on the market:
+        # 0.0 = market beta, +0.5 = beta 1.5.
+        chart_holdings[
+            f"beta_contribution_{suffix}"
+        ] = beta - 1.0
+
     col1, col2 = st.columns(2)
 
     with col1:
 
-        st.subheader(
-            "Risk contribution"
-        )
+        if risk_view == "Weight-adjusted":
+
+            st.subheader(
+                "Risk intensity vs weight"
+            )
+
+            st.caption(
+                "0% = risk contribution matches portfolio weight. "
+                "Positive values punch above their weight; negative "
+                "values contribute less risk than their weight suggests."
+            )
+
+        else:
+
+            st.subheader(
+                "Risk contribution"
+            )
+
+            st.caption(
+                "Share of total portfolio variance contributed by each holding."
+            )
 
         render_risk_contribution(
-            holdings_table,
+            chart_holdings,
             contribution_period,
         )
 
     with col2:
 
-        st.subheader(
-            "Beta contribution"
-        )
+        if risk_view == "Weight-adjusted":
+
+            st.subheader(
+                "Beta vs market"
+            )
+
+            st.caption(
+                "Allocation size removed. 0.0 = market beta; +0.5 means "
+                "holding beta 1.5; -0.5 means holding beta 0.5."
+            )
+
+        else:
+
+            st.subheader(
+                "Beta contribution"
+            )
+
+            st.caption(
+                "Portfolio-weighted contribution to total portfolio beta."
+            )
 
         render_beta_contribution(
-            holdings_table,
+            chart_holdings,
             contribution_period,
         )
 
@@ -3963,7 +4448,7 @@ def render_holdings():
     st.dataframe(
         holding_display.round(2),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
 
     st.subheader(

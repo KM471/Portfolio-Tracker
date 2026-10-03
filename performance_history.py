@@ -11,24 +11,9 @@ from benchmark import get_benchmark_history
 def get_performance_history(
     force_refresh=False,
 ):
-
-    # --------------------------------------------------------
-    # Actual account history
-    #
-    # Includes:
-    # - holdings
-    # - cash
-    # - deposits / withdrawals
-    # - dividends
-    # --------------------------------------------------------
-
     account = get_account_history(
         force_refresh=force_refresh,
     ).copy()
-
-    # --------------------------------------------------------
-    # Counterfactual S&P 500 portfolio
-    # --------------------------------------------------------
 
     benchmark = get_benchmark_history(
         force_refresh=force_refresh,
@@ -44,43 +29,24 @@ def get_performance_history(
             "Benchmark history is empty."
         )
 
-    # ========================================================
-    # NORMALISE DATES
-    # ========================================================
+    account["date"] = pd.to_datetime(
+        account["date"],
+        errors="coerce",
+    ).dt.normalize()
 
-    account["date"] = (
-        pd.to_datetime(
-            account["date"],
-            errors="coerce",
-        )
-        .dt.normalize()
-    )
-
-    benchmark["date"] = (
-        pd.to_datetime(
-            benchmark["date"],
-            errors="coerce",
-        )
-        .dt.normalize()
-    )
-
-    # ========================================================
-    # CLEARER NAMES
-    # ========================================================
+    benchmark["date"] = pd.to_datetime(
+        benchmark["date"],
+        errors="coerce",
+    ).dt.normalize()
 
     account = account.rename(
         columns={
             "invested_value_eur":
                 "holdings_value_eur",
-
             "account_value_eur":
                 "portfolio_value_eur",
         }
     )
-
-    # ========================================================
-    # MERGE
-    # ========================================================
 
     history = pd.merge(
         account,
@@ -90,6 +56,7 @@ def get_performance_history(
                 "benchmark_value_eur",
                 "benchmark_units",
                 "benchmark_price_eur",
+                "benchmark_flow_eur",
                 "benchmark_gain_eur",
             ]
         ],
@@ -103,88 +70,54 @@ def get_performance_history(
         .reset_index(drop=True)
     )
 
-    # ========================================================
-    # BENCHMARK CASH FLOW
-    #
-    # Your benchmark rule:
-    #
-    # Buy €X stock  -> buy €X S&P 500
-    # Sell €X stock -> sell €X S&P 500
-    # ========================================================
-
-    history[
-        "benchmark_flow_eur"
-    ] = (
-        history[
-            "gross_buys_eur"
-        ]
-        -
-        history[
-            "gross_sells_eur"
-        ]
+    # Profit is account NAV minus net external capital.
+    # Cash left inside the brokerage remains part of NAV, so
+    # selling investments does not create a fake loss.
+    history["portfolio_gain_eur"] = (
+        history["portfolio_value_eur"]
+        - history["net_capital_invested_eur"]
     )
 
-    # ========================================================
-    # ACCOUNT PROFIT
-    # ========================================================
-
-    history[
-        "portfolio_gain_eur"
-    ] = (
-        history[
-            "portfolio_value_eur"
-        ]
-        -
-        history[
-            "net_capital_invested_eur"
-        ]
+    history["portfolio_vs_benchmark_eur"] = (
+        history["portfolio_value_eur"]
+        - history["benchmark_value_eur"]
     )
 
-    # ========================================================
-    # PORTFOLIO VS BENCHMARK
-    # ========================================================
-
-    history[
-        "portfolio_vs_benchmark_eur"
-    ] = (
-        history[
-            "portfolio_value_eur"
-        ]
-        -
-        history[
-            "benchmark_value_eur"
-        ]
-    )
-
-    # ========================================================
-    # PEAK VALUES
-    # ========================================================
-
-    history[
-        "portfolio_peak_eur"
-    ] = (
-        history[
-            "portfolio_value_eur"
-        ]
+    history["portfolio_peak_eur"] = (
+        history["portfolio_value_eur"]
         .cummax()
     )
 
-    history[
-        "benchmark_peak_eur"
-    ] = (
-        history[
-            "benchmark_value_eur"
-        ]
+    history["benchmark_peak_eur"] = (
+        history["benchmark_value_eur"]
         .cummax()
     )
 
-    history[
-        "capital_peak_eur"
-    ] = (
-        history[
-            "net_capital_invested_eur"
-        ]
+    history["capital_peak_eur"] = (
+        history["net_capital_invested_eur"]
         .cummax()
+    )
+
+    # Helpful diagnostic / allocation field.
+    history["cash_weight_pct"] = 0.0
+
+    positive_nav = (
+        history["portfolio_value_eur"] > 0
+    )
+
+    history.loc[
+        positive_nav,
+        "cash_weight_pct",
+    ] = (
+        history.loc[
+            positive_nav,
+            "cash_balance_eur",
+        ]
+        / history.loc[
+            positive_nav,
+            "portfolio_value_eur",
+        ]
+        * 100.0
     )
 
     return history

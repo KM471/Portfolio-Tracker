@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import time
 
 import pandas as pd
@@ -16,6 +17,15 @@ CACHE_DIRECTORY = (
 
 CACHE_LIFETIME_SECONDS = 60 * 60 * 6
 
+# Allows for weekends / market holidays when checking whether
+# the first returned market observation is close enough to the
+# requested start date.
+COVERAGE_TOLERANCE_DAYS = 7
+
+
+# ============================================================
+# CACHE PATHS
+# ============================================================
 
 def _cache_path(
     trading212_ticker,
@@ -38,6 +48,31 @@ def _cache_path(
     )
 
 
+def _cache_metadata_path(
+    trading212_ticker,
+):
+    CACHE_DIRECTORY.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    safe_name = (
+        trading212_ticker.replace(
+            "/",
+            "_",
+        )
+    )
+
+    return (
+        CACHE_DIRECTORY
+        / f"{safe_name}.meta.json"
+    )
+
+
+# ============================================================
+# CACHE HELPERS
+# ============================================================
+
 def _cache_is_fresh(
     path,
     max_age_seconds,
@@ -56,6 +91,315 @@ def _cache_is_fresh(
     )
 
 
+def _normalise_start_date(
+    value,
+):
+    return (
+        pd.Timestamp(value)
+        .normalize()
+    )
+
+
+def _load_cached_history(
+    path,
+):
+    if not path.exists():
+        return pd.DataFrame()
+
+    try:
+        cached = pd.read_csv(
+            path,
+            parse_dates=[
+                "date",
+            ],
+        )
+
+    except (
+        ValueError,
+        OSError,
+    ):
+        return pd.DataFrame()
+
+    if cached.empty:
+        return cached
+
+    cached["date"] = pd.to_datetime(
+        cached["date"],
+        errors="coerce",
+    )
+
+    if cached["date"].dt.tz is not None:
+        cached["date"] = (
+            cached["date"]
+            .dt.tz_localize(None)
+        )
+
+    cached["date"] = (
+        cached["date"]
+        .dt.normalize()
+    )
+
+    if "close" in cached.columns:
+        cached["close"] = pd.to_numeric(
+            cached["close"],
+            errors="coerce",
+        )
+
+    cached = cached.dropna(
+        subset=[
+            "date",
+            "close",
+        ]
+    )
+
+    duplicate_columns = [
+        "date",
+    ]
+
+    if (
+        "trading212_ticker"
+        in cached.columns
+    ):
+        duplicate_columns.append(
+            "trading212_ticker"
+        )
+
+    return (
+        cached
+        .sort_values(
+            "date"
+        )
+        .drop_duplicates(
+            subset=duplicate_columns,
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+def _load_cache_coverage(
+    trading212_ticker,
+):
+    path = _cache_metadata_path(
+        trading212_ticker
+    )
+
+    if not path.exists():
+        return None
+
+    try:
+        with path.open(
+            "r",
+            encoding="utf-8",
+        ) as file:
+            metadata = json.load(
+                file
+            )
+
+        value = metadata.get(
+            "earliest_requested_start"
+        )
+
+        if not value:
+            return None
+
+        return (
+            pd.Timestamp(value)
+            .normalize()
+        )
+
+    except (
+        ValueError,
+        TypeError,
+        OSError,
+        json.JSONDecodeError,
+    ):
+        return None
+
+
+def _save_cache_coverage(
+    trading212_ticker,
+    coverage_start,
+):
+    path = _cache_metadata_path(
+        trading212_ticker
+    )
+
+    coverage_start = (
+        pd.Timestamp(
+            coverage_start
+        )
+        .normalize()
+    )
+
+    metadata = {
+        "earliest_requested_start":
+            coverage_start.strftime(
+                "%Y-%m-%d"
+            )
+    }
+
+    with path.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            metadata,
+            file,
+            indent=2,
+        )
+
+
+def _cache_covers_start_date(
+    trading212_ticker,
+    cached,
+    requested_start,
+):
+    if cached.empty:
+        return False
+
+    requested_start = (
+        _normalise_start_date(
+            requested_start
+        )
+    )
+
+    # Preferred method:
+    # metadata records the earliest date Yahoo has already been
+    # asked to provide for this instrument.
+    coverage_start = (
+        _load_cache_coverage(
+            trading212_ticker
+        )
+    )
+
+    if (
+        coverage_start is not None
+        and coverage_start
+        <= requested_start
+    ):
+        return True
+
+    # Backwards compatibility for cache files created before
+    # coverage metadata existed.
+    #
+    # A few days' difference is acceptable because weekends
+    # and market holidays may mean the first actual price is
+    # later than the requested calendar date.
+    earliest_cached_date = (
+        cached["date"]
+        .min()
+    )
+
+    tolerance_end = (
+        requested_start
+        + pd.Timedelta(
+            days=COVERAGE_TOLERANCE_DAYS
+        )
+    )
+
+    if (
+        pd.notna(
+            earliest_cached_date
+        )
+        and earliest_cached_date
+        <= tolerance_end
+    ):
+        # Record the requested start so future checks do not need
+        # to infer coverage from the first market observation.
+        _save_cache_coverage(
+            trading212_ticker,
+            requested_start,
+        )
+
+        return True
+
+    return False
+
+
+def _merge_histories(
+    cached,
+    fresh,
+):
+    if cached.empty:
+        merged = fresh.copy()
+
+    elif fresh.empty:
+        merged = cached.copy()
+
+    else:
+        merged = pd.concat(
+            [
+                cached,
+                fresh,
+            ],
+            ignore_index=True,
+        )
+
+    if merged.empty:
+        return merged
+
+    merged["date"] = pd.to_datetime(
+        merged["date"],
+        errors="coerce",
+    )
+
+    if merged["date"].dt.tz is not None:
+        merged["date"] = (
+            merged["date"]
+            .dt.tz_localize(None)
+        )
+
+    merged["date"] = (
+        merged["date"]
+        .dt.normalize()
+    )
+
+    merged["close"] = pd.to_numeric(
+        merged["close"],
+        errors="coerce",
+    )
+
+    merged = merged.dropna(
+        subset=[
+            "date",
+            "close",
+        ]
+    )
+
+    duplicate_columns = [
+        "date",
+    ]
+
+    if (
+        "trading212_ticker"
+        in merged.columns
+    ):
+        duplicate_columns.append(
+            "trading212_ticker"
+        )
+
+    return (
+        merged
+        .sort_values(
+            "date"
+        )
+        .drop_duplicates(
+            subset=duplicate_columns,
+            keep="last",
+        )
+        .reset_index(
+            drop=True
+        )
+    )
+
+
+# ============================================================
+# CURRENCY NORMALISATION
+# ============================================================
+
 def _normalise_currency(
     currency_code,
 ):
@@ -67,6 +411,10 @@ def _normalise_currency(
         1.0,
     )
 
+
+# ============================================================
+# YAHOO DOWNLOAD
+# ============================================================
 
 def _download_price_history(
     trading212_ticker,
@@ -113,7 +461,14 @@ def _download_price_history(
     )
 
     history = ticker.history(
-        start=start_date,
+        start=(
+            pd.Timestamp(
+                start_date
+            )
+            .strftime(
+                "%Y-%m-%d"
+            )
+        ),
         auto_adjust=False,
         actions=True,
     )
@@ -133,60 +488,33 @@ def _download_price_history(
             columns={
                 "Date": "date",
                 "Close": "close",
-                "Dividends": (
-                    "dividends"
-                ),
-                "Stock Splits": (
-                    "stock_splits"
-                ),
+                "Dividends":
+                    "dividends",
+                "Stock Splits":
+                    "stock_splits",
             }
         )
     )
 
-    history[
-        "date"
-    ] = pd.to_datetime(
-        history[
-            "date"
-        ],
+    history["date"] = pd.to_datetime(
+        history["date"],
         errors="coerce",
     )
 
-    if (
-        history[
-            "date"
-        ].dt.tz
-        is not None
-    ):
-        history[
-            "date"
-        ] = (
-            history[
-                "date"
-            ]
-            .dt
-            .tz_localize(
-                None
-            )
+    if history["date"].dt.tz is not None:
+        history["date"] = (
+            history["date"]
+            .dt.tz_localize(None)
         )
 
-    history[
-        "date"
-    ] = (
-        history[
-            "date"
-        ]
-        .dt
-        .normalize()
+    history["date"] = (
+        history["date"]
+        .dt.normalize()
     )
 
-    history[
-        "close"
-    ] = (
+    history["close"] = (
         pd.to_numeric(
-            history[
-                "close"
-            ],
+            history["close"],
             errors="coerce",
         )
         * price_multiplier
@@ -196,9 +524,7 @@ def _download_price_history(
         "dividends"
         in history.columns
     ):
-        history[
-            "dividends"
-        ] = (
+        history["dividends"] = (
             pd.to_numeric(
                 history[
                     "dividends"
@@ -206,23 +532,19 @@ def _download_price_history(
                 errors="coerce",
             )
             .fillna(
-                0
+                0.0
             )
             * price_multiplier
         )
 
     else:
-        history[
-            "dividends"
-        ] = 0.0
+        history["dividends"] = 0.0
 
     if (
         "stock_splits"
         in history.columns
     ):
-        history[
-            "stock_splits"
-        ] = (
+        history["stock_splits"] = (
             pd.to_numeric(
                 history[
                     "stock_splits"
@@ -230,14 +552,12 @@ def _download_price_history(
                 errors="coerce",
             )
             .fillna(
-                0
+                0.0
             )
         )
 
     else:
-        history[
-            "stock_splits"
-        ] = 0.0
+        history["stock_splits"] = 0.0
 
     history[
         "trading212_ticker"
@@ -268,17 +588,34 @@ def _download_price_history(
         ]
     ]
 
-    history = (
-        history.dropna(
+    history = history.dropna(
+        subset=[
+            "date",
+            "close",
+        ]
+    )
+
+    return (
+        history
+        .sort_values(
+            "date"
+        )
+        .drop_duplicates(
             subset=[
                 "date",
-                "close",
-            ]
+                "trading212_ticker",
+            ],
+            keep="last",
+        )
+        .reset_index(
+            drop=True
         )
     )
 
-    return history
 
+# ============================================================
+# PUBLIC PRICE HISTORY
+# ============================================================
 
 def get_price_history(
     trading212_ticker,
@@ -288,49 +625,99 @@ def get_price_history(
         CACHE_LIFETIME_SECONDS
     ),
 ):
+    requested_start = (
+        _normalise_start_date(
+            start_date
+        )
+    )
+
     path = _cache_path(
         trading212_ticker
     )
 
-    if (
-        not force_refresh
-        and _cache_is_fresh(
-            path,
-            max_age_seconds,
-        )
-    ):
-        try:
-            cached = (
-                pd.read_csv(
-                    path,
-                    parse_dates=[
-                        "date"
-                    ],
-                )
-            )
-
-            if not cached.empty:
-                return cached
-
-        except (
-            ValueError,
-            OSError,
-        ):
-            pass
-
-    history = (
-        _download_price_history(
-            trading212_ticker,
-            start_date,
+    cached = (
+        _load_cached_history(
+            path
         )
     )
 
-    history.to_csv(
+    cache_fresh = (
+        _cache_is_fresh(
+            path,
+            max_age_seconds,
+        )
+    )
+
+    cache_has_coverage = (
+        _cache_covers_start_date(
+            trading212_ticker,
+            cached,
+            requested_start,
+        )
+    )
+
+    # A cached file is reusable only when BOTH conditions hold:
+    #
+    # 1. it is recent enough;
+    # 2. it covers the historical range being requested.
+    if (
+        not force_refresh
+        and cache_fresh
+        and cache_has_coverage
+    ):
+        return cached
+
+    # Download from the requested start date.
+    #
+    # Existing older cached observations are merged back in so
+    # refreshing a shorter-history account cannot truncate the
+    # history previously downloaded for a longer-history account.
+    fresh = _download_price_history(
+        trading212_ticker,
+        requested_start,
+    )
+
+    merged = _merge_histories(
+        cached,
+        fresh,
+    )
+
+    merged.to_csv(
         path,
         index=False,
     )
 
-    return history
+    # Determine what historical start the cache is known to cover.
+    previous_coverage = None
+
+    if not cached.empty:
+        previous_coverage = (
+            _load_cache_coverage(
+                trading212_ticker
+            )
+        )
+
+        if previous_coverage is None:
+            previous_coverage = (
+                cached["date"]
+                .min()
+            )
+
+    if previous_coverage is None:
+        new_coverage = requested_start
+
+    else:
+        new_coverage = min(
+            previous_coverage,
+            requested_start,
+        )
+
+    _save_cache_coverage(
+        trading212_ticker,
+        new_coverage,
+    )
+
+    return merged
 
 
 def get_all_price_history(
@@ -346,12 +733,8 @@ def get_all_price_history(
         history = (
             get_price_history(
                 trading212_ticker,
-                start_date=(
-                    start_date
-                ),
-                force_refresh=(
-                    force_refresh
-                ),
+                start_date=start_date,
+                force_refresh=force_refresh,
             )
         )
 
