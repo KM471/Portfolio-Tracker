@@ -1,6 +1,6 @@
 # Trading 212 Portfolio Tracker
 
-A Python + Streamlit dashboard that connects to the Trading 212 API and answers a question a headline return alone cannot: *is this actually a good return, or does it just look like one?*
+A Python + Streamlit dashboard for analysing a Trading 212 portfolio beyond the headline figures shown by the broker.
 
 It reconstructs portfolio history day by day, separates investment performance from the timing of my own deposits and withdrawals, benchmarks against a cash-flow-matched S&P 500, and breaks risk down to the individual holding.
 
@@ -30,11 +30,11 @@ That's why the dashboard reports **time-weighted return (TWR)** and **money-weig
 
 ## Features
 
-**Overview** — account value, TWR, MWR, S&P 500 comparison and outperformance, current allocation, and a quick risk summary at a glance.
+**Overview** — account value, total profit, annualised money-weighted return (XIRR), a cash-flow-matched S&P 500 comparison, annualised outperformance, TWR, current allocation, and a quick risk summary at a glance. Shorter periods also show cumulative MWR alongside an annualised XIRR equivalent.
 
-**Performance** — rolling 1M / 3M / 1Y / full-history returns, start and end values per period, external cash flows, benchmark returns, best/worst day, and risk-adjusted performance stats.
+**Performance** — 1M / 3M / 1Y / full-history analysis covering cumulative MWR, annualised XIRR, TWR, start and end values, external cash flows, benchmark returns, best/worst day, and risk-adjusted performance stats.
 
-**Risk** — volatility, beta, correlation, Sharpe, Sortino, max drawdown (with duration), historical VaR, rolling beta/volatility, and holding-level risk contribution.
+**Risk** — volatility, beta, correlation, Sharpe, Sortino, max drawdown (with duration), historical VaR, rolling beta/volatility, and holding-level risk views. The holding charts can show either actual portfolio contribution or a weight-adjusted view that separates a holding's own risk/beta from simply being a large position.
 
 **Capital** — net invested capital and portfolio profit tracked separately through time, so cash movements never get mistaken for performance.
 
@@ -52,10 +52,11 @@ That's why the dashboard reports **time-weighted return (TWR)** and **money-weig
 The app reconstructs portfolio value day by day and strips out external cash flows before calculating each day's return:
 
 ```
-daily return = (ending value − external cash flow) / previous value − 1
+daily return = (ending value − beginning value − external cash flow)
+               / (beginning value + weighted external flow)
 ```
 
-A deposit is removed from the return rather than counted as profit; a withdrawal is handled the same way in reverse. Trades *within* the account (selling one stock to buy another) aren't external cash flows, so they don't affect this.
+The weighted flow accounts for when an external cash movement happened during the day. A deposit is removed from the return rather than counted as profit; a withdrawal is handled the same way in reverse. Trades *within* the account (selling one stock to buy another) aren't external cash flows, so they don't affect this.
 
 Daily returns are then linked geometrically:
 
@@ -74,7 +75,7 @@ Uses an **XIRR-style calculation** on the actual dates of my deposits and withdr
 Σ [ cash_flow_i / (1 + r)^(days_i / 365) ] = 0
 ```
 
-Because it uses real dates, two identical deposits at different points in the year don't affect the result equally. For dashboard periods (1M/3M/1Y), the annualised XIRR is converted back to the cumulative return over that exact window so it's comparable to TWR. With no external cash flows in a period, MWR reduces to the ordinary start-to-end return and should therefore be very close to TWR.
+Because it uses real dates, two identical deposits at different points in the year don't affect the result equally. For dashboard periods (1M/3M/1Y), the app shows the cumulative money-weighted result for the selected window and its annualised XIRR equivalent. For full history, annualised XIRR is the main money-weighted figure on the overview, while the cumulative MWR equivalent is still shown as context. With no external cash flows in a period, MWR reduces to the ordinary start-to-end return and should therefore be very close to TWR.
 
 **Fallback:** where XIRR has no clean solution, the app falls back to **Modified Dietz**, which weights each cash flow by how long it was invested during the period:
 
@@ -142,7 +143,7 @@ The largest fall is the max drawdown; the app also tracks how long the portfolio
 risk contribution_i = wᵢ × (Σw)ᵢ / portfolio variance
 ```
 
-This is why a position can be a small % of the portfolio by value but a large % of its risk.
+The dashboard keeps this actual contribution view, but also offers a weight-adjusted view. That makes it easier to tell whether a holding is contributing a lot of risk simply because it is a large position, or because it is unusually risky relative to its portfolio weight. The beta view can similarly show the holding's own beta relative to the market rather than only `weight × beta`.
 
 </details>
 
@@ -232,6 +233,8 @@ Known Trading 212 → Yahoo Finance mappings are handled deterministically. When
 
 Automatically resolved mappings are cached so the OpenAI API is not normally called again for the same instrument while that cache persists.
 
+Historical Trading 212 activity is cached separately per account. Public market-price and FX caches are shared, but their date coverage is checked before reuse so a short-history cache cannot silently truncate a longer account history. Historical order quantities are also normalised for stock splits before they are matched with Yahoo historical prices.
+
 For local development, credentials are loaded from a `.env` file that is excluded from Git. The deployed Streamlit application uses Streamlit Secrets instead. API keys are never stored in the repository.
 
 ## Quick start
@@ -257,7 +260,7 @@ Then run:
 streamlit run app.py
 ```
 
-The project is primarily built and validated around my own Trading 212 account. AI-assisted ticker resolution removes the need to manually add every unfamiliar Yahoo Finance symbol, but the wider historical cache and reconstruction logic are still designed around single-account use.
+The project was originally built and validated around my own Trading 212 account. AI-assisted ticker resolution removes the need to manually add every unfamiliar Yahoo Finance symbol, and historical account caches are now separated by account while public market/FX data can be safely reused across accounts when the required date range is already cached.
 
 ---
 
@@ -292,7 +295,6 @@ AI made the build much faster. The part that actually taught me something was le
 - **Ticker resolution:** known mappings are deterministic, while unseen instruments can fall back to AI-assisted Yahoo Finance resolution. Unusual listings, share classes or incomplete external metadata can still create edge cases even though candidate symbols are verified before use.
 - **AI mapping cache:** automatically resolved ticker mappings are cached locally. On ephemeral cloud infrastructure such as Streamlit Community Cloud, the cache may be lost when the application environment is recreated, causing an instrument to be resolved again.
 - **Full liquidation and re-entry:** reconstruction works well for my history, but fully selling out and later rebuilding a portfolio creates edge cases that need more testing before this generalises to other accounts.
-- **Historical account cache:** designed around single-account use — it should be cleared before pointing the app at a different Trading 212 account.
 - **Broker vs. reconstructed values:** small differences can appear versus Trading 212's own live prices and FX/valuation timing.
 - **Current-holdings backtest:** deliberately holds today's weights constant through a past period — it's a hypothetical comparison, not what I actually owned at the time.
 
