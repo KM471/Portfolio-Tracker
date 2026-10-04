@@ -1,8 +1,10 @@
 # Trading 212 Portfolio Tracker
 
-A Python + Streamlit dashboard for analysing a Trading 212 portfolio beyond the headline figures shown by the broker.
+This is a personal portfolio analytics dashboard I built in Python and Streamlit around my Trading 212 account.
 
-It reconstructs portfolio history day by day, separates investment performance from the timing of my own deposits and withdrawals, benchmarks against a cash-flow-matched S&P 500, and breaks risk down to the individual holding.
+It pulls account data from the Trading 212 API, reconstructs the portfolio historically, and turns it into something much more useful than the basic figures shown in the broker app. It tracks performance over time, separates investment returns from deposits and withdrawals, compares the portfolio against a cash-flow-matched S&P 500 benchmark, and breaks down risk across the portfolio and individual holdings.
+
+I originally started it because I wanted a better answer to a fairly simple question: how well was my portfolio actually doing? From there it gradually turned into a much bigger project covering money-weighted returns, time-weighted returns, XIRR, benchmark performance, portfolio risk, historical reconstruction, and current-holdings analysis.
 
 **[Live Dashboard](https://kian-portfolio-dashboard.streamlit.app)**
 
